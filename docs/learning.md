@@ -178,3 +178,55 @@ To see how leaf base cases and non-leaf recursive stack frames work together, [`
   2. Spills `n` (`[sp, #16]`) and the result of `fib(n - 1)` (`[sp, #24]`) onto its private stack frame across the two recursive `bl fib` calls.
   3. Executes `ldp x29, x30, [sp], #32` (**post-indexed writeback**) to restore `FP` and `LR` and pop the 32-byte frame before `ret`.
 * Across 177 recursive calls (1,503 instruction cycles), `SP` grows downward by up to $10 \times 32 = 320\text{ bytes}$ and unwinds back to `0x00700000`, exiting cleanly with `X0 = 55`.
+
+---
+
+## 8. Case Study 5: Interactive Visual Debugger Architecture
+
+Building a graphical debugger for a CPU emulator requires decoupling the emulator engine from synchronous command-line loops. In Mini-QEMU, the web visual debugger (`npm run ui`) introduces five core architectural patterns:
+
+```
++-----------------------------------------------------------------------------------+
+|                        Web Visual Debugger Architecture                           |
+|                                                                                   |
+|  [ User Actions ]              [ Execution Engine ]               [ Visual DOM ]  |
+|  - Run / Pause                  MiniQEMU.step()                     - Registers   |
+|  - Step (F10)        ----->      - Snapshot Diff   -----> Update    - Flags NZCV  |
+|  - Set Breakpoint                - Event Callbacks                  - Disassembly |
+|  - Jump Memory                   - Traps & Halts                    - Hex Viewer  |
++-----------------------------------------------------------------------------------+
+```
+
+### 1. Dual-Environment Binary Loading (`DataView` over `Buffer`)
+Traditional Node.js programs rely on `fs.readFileSync` returning a Node `Buffer`. To allow the emulator to run natively in web browsers (and accept user-uploaded files), the loader was refactored:
+* Browser uploads yield standard `ArrayBuffer` or `Uint8Array`.
+* Parsing uses standard ECMAScript `DataView`:
+  ```javascript
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const entry = view.getBigUint64(24, true); // Little-endian 64-bit integer
+  ```
+* This achieves **100% zero-build browser compatibility** while continuing to work synchronously in CLI scripts.
+
+### 2. Event-Driven Lifecycle Hooks
+Rather than printing directly to `process.stdout`, the CPU interpreter exposes hook callbacks:
+* `onStep(stepResult)`: Delivers the active instruction, current PC, next PC, condition flags, and modified registers.
+* `onWrite(text, fd)`: Traps Linux `sys_write` (syscall 64) and redirects stdout/stderr into the virtual DOM terminal window.
+* `onHalt(exitCode)`: Traps process exit (syscall 93) and freezes the visual clock.
+
+### 3. Register Mutation Diff Tracking
+To make execution intuitive, every step records a register state diff:
+```javascript
+const changedRegs = [];
+for (let i = 0; i < 31; i++) {
+  if (this.cpu.x[i] !== prevRegs[i]) {
+    changedRegs.push({ index: i, name: `X${i}`, val: this.cpu.x[i] });
+  }
+}
+```
+The frontend highlights these registers in cyan with a CSS fade pulse, allowing students to immediately see which register changed as a consequence of the current instruction.
+
+### 4. Non-Blocking Adaptive Runner
+The browser GUI supports arbitrary clock rates:
+* **Clocked Rates (1 Hz, 5 Hz, 20 Hz, 100 Hz):** Use `setInterval` to trigger individual cycles with guaranteed UI repaints.
+* **Turbo Mode (Max Speed):** Batches 50 cycles per `requestAnimationFrame` frame, providing thousands of instructions per second while keeping the UI responsive.
+

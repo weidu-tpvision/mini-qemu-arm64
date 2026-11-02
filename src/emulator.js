@@ -9,11 +9,61 @@ export class MiniQEMU {
     this.memory = new Memory();
     this.cpu = new CPU(this.memory);
     this.cycleCount = 0;
+    this.breakpoints = new Set();
+    this.onWrite = null;
+    this.onStep = null;
+    this.onHalt = null;
+    this.loadedSource = null;
+    this.entryPoint = 0n;
   }
 
-  loadElf(filePath) {
-    const entryPoint = ElfLoader.load(filePath, this.memory);
+  addBreakpoint(addr) {
+    this.breakpoints.add(Number(addr));
+  }
+
+  removeBreakpoint(addr) {
+    this.breakpoints.delete(Number(addr));
+  }
+
+  toggleBreakpoint(addr) {
+    const a = Number(addr);
+    if (this.breakpoints.has(a)) {
+      this.breakpoints.delete(a);
+      return false;
+    } else {
+      this.breakpoints.add(a);
+      return true;
+    }
+  }
+
+  clearBreakpoints() {
+    this.breakpoints.clear();
+  }
+
+  hasBreakpoint(addr) {
+    return this.breakpoints.has(Number(addr));
+  }
+
+  loadElf(filePathOrBuffer, name = "binary.elf") {
+    this.memory.clear();
+    this.cpu.reset();
+    this.cycleCount = 0;
+    this.loadedSource = { source: filePathOrBuffer, name };
+    const entryPoint = ElfLoader.load(filePathOrBuffer, this.memory);
+    this.entryPoint = entryPoint;
     this.cpu.pc = entryPoint;
+    return entryPoint;
+  }
+
+  reset() {
+    if (this.loadedSource) {
+      return this.loadElf(this.loadedSource.source, this.loadedSource.name);
+    } else {
+      this.memory.clear();
+      this.cpu.reset();
+      this.cycleCount = 0;
+      return 0n;
+    }
   }
 
   loadProgram(instructions, loadAddress = 0x00400000) {
@@ -56,7 +106,19 @@ export class MiniQEMU {
 
   // Execute one cycle: Fetch -> Decode -> Execute
   step(verbose = true) {
+    if (this.cpu.halted) {
+      return {
+        cycle: this.cycleCount,
+        pc: Number(this.cpu.pc),
+        halted: true,
+        exitCode: this.cpu.exitCode
+      };
+    }
+
     const currentPC = Number(this.cpu.pc);
+    const prevRegs = Array.from(this.cpu.x);
+    const prevSP = this.cpu.sp;
+    this.memory.lastWritten.clear();
 
     // 1. FETCH
     const rawInstr = this.memory.read32(currentPC);
@@ -350,18 +412,24 @@ export class MiniQEMU {
         if (syscallNum === 93) { // sys_exit
           this.cpu.exitCode = Number(this.cpu.getReg(0));
           this.cpu.halted = true;
+          if (this.onHalt) {
+            this.onHalt(this.cpu.exitCode);
+          }
         } else if (syscallNum === 64) { // sys_write
           const fd = Number(this.cpu.getReg(0));
           const bufAddr = Number(this.cpu.getReg(1));
           const count = Number(this.cpu.getReg(2));
 
-          const bytes = Buffer.alloc(count);
+          const bytes = new Uint8Array(count);
           for (let i = 0; i < count; i++) {
             bytes[i] = this.memory.read8(bufAddr + i);
           }
-          const text = bytes.toString("utf8");
+          const text = new TextDecoder().decode(bytes);
 
-          if (fd === 1 || fd === 2) {
+          if (this.onWrite) {
+            this.onWrite(text, fd);
+          }
+          if ((fd === 1 || fd === 2) && typeof process !== "undefined" && process.stdout && !this.suppressStdout) {
             process.stdout.write(text);
           }
 
@@ -378,9 +446,44 @@ export class MiniQEMU {
     }
 
     this.cycleCount++;
+
+    const changedRegs = [];
+    for (let i = 0; i < 31; i++) {
+      if (this.cpu.x[i] !== prevRegs[i]) {
+        changedRegs.push({ index: i, name: `X${i}`, val: this.cpu.x[i], prev: prevRegs[i] });
+      }
+    }
+    if (this.cpu.sp !== prevSP) {
+      changedRegs.push({ index: 31, name: "SP", val: this.cpu.sp, prev: prevSP });
+    }
+
+    const nextPC = Number(this.cpu.pc);
+    const stepResult = {
+      cycle: this.cycleCount,
+      pc: currentPC,
+      nextPC,
+      rawInstr,
+      hexPC,
+      hexInstr,
+      decoded,
+      disassembly: decoded.disassembly,
+      flags: { ...this.cpu.flags },
+      changedRegs,
+      changedMem: Array.from(this.memory.lastWritten),
+      halted: this.cpu.halted,
+      exitCode: this.cpu.exitCode,
+      hitBreakpoint: this.breakpoints.has(nextPC)
+    };
+
+    if (this.onStep) {
+      this.onStep(stepResult);
+    }
+
     if (verbose) {
       console.log(`[Cycle ${this.cycleCount.toString().padStart(3, " ")}] ${hexPC}: ${hexInstr} | ${decoded.disassembly.padEnd(25, " ")} | ${this.cpu.dumpState()}`);
     }
+
+    return stepResult;
   }
 
   run(maxCycles = 10000, verbose = true) {
@@ -391,7 +494,13 @@ export class MiniQEMU {
     }
 
     while (!this.cpu.halted && this.cycleCount < maxCycles) {
-      this.step(verbose);
+      const res = this.step(verbose);
+      if (res.hitBreakpoint) {
+        if (verbose) {
+          console.log(`[Mini-QEMU] Hit breakpoint at 0x${res.nextPC.toString(16).padStart(8, "0")}`);
+        }
+        break;
+      }
     }
 
     if (verbose) {
@@ -400,7 +509,7 @@ export class MiniQEMU {
         console.log(`Program terminated cleanly via Linux sys_exit (syscall 93).`);
         console.log(`>>> Exit Code (Result in X0): ${this.cpu.exitCode} <<<`);
       } else {
-        console.log(`Execution reached cycle limit (${maxCycles}) without halting.`);
+        console.log(`Execution reached cycle limit or breakpoint (${maxCycles}) without halting.`);
       }
       console.log(`Total Cycles Executed: ${this.cycleCount}`);
       console.log("==========================================================================================");
@@ -409,8 +518,8 @@ export class MiniQEMU {
   }
 }
 
-// If executed directly, run target ELF file
-if (process.argv[1].endsWith("emulator.js")) {
+// If executed directly in Node.js CLI, run target ELF file
+if (typeof process !== "undefined" && process.argv && process.argv[1]?.endsWith("emulator.js")) {
   const args = process.argv.slice(2);
   const quiet = args.includes("--quiet") || args.includes("-q");
   const targetFile = args.find(a => !a.startsWith("-")) || "bin/fib.elf";

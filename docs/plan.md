@@ -164,6 +164,23 @@ The processor state consists of:
      * $X_2$: String length in bytes.
      * Action: Mini-QEMU reads the string from virtual memory and writes it to the host terminal.
 
+### Phase 6: Interactive Web UI & Visual Debugger
+* **Goal:** Deliver an interactive visual debugger and execution dashboard running directly in the browser with zero heavy native dependencies.
+* **Deliverables:**
+  1. **Core Decoupling & Browser Compatibility:**
+     * Refactored `ElfLoader` using standard `DataView` for `Uint8Array` in-memory buffers.
+     * Added lifecycle hooks (`onStep`, `onWrite`, `onHalt`), `reset()`, and `breakpoints` set.
+     * Memory block reading (`readBlock`) and CPU snapshot generation (`getSnapshot`).
+  2. **Zero-Dependency Dev Server (`tools/server.js`):**
+     * Built-in HTTP server providing binary catalog (`/api/binaries`) and streaming raw ELF binaries.
+     * Configured `npm run ui` command with automatic port fallback.
+  3. **Visual Debugger Frontend (`ui/`):**
+     * **CPU State Inspector:** Live registers (`X0`–`X30`), `PC`, `SP`, `FP`, `LR`, condition flags (`NZCV`), and real-time diff pulse highlighting.
+     * **Disassembly & Breakpoints:** Automatic `.text` disassembly with current PC pointer and clickable breakpoint gutters.
+     * **Memory & Stack Hex Viewer:** 256-byte hex dump with ASCII previews and address jumps.
+     * **Guest Terminal:** Live Linux syscall output viewer with exit code reporting.
+     * **Custom Binary Loader:** Drag-and-drop custom ELF upload and speed slider (1 Hz to Turbo).
+
 ---
 
 ## 4. Verification & Testing Strategy
@@ -177,6 +194,7 @@ The processor state consists of:
 | **Static AOT Recompilation** | Decompile `fib.elf` to native JavaScript and benchmark | 81.5x speedup over interpreter | **PASS** |
 | **Memory Store & Load** | Execute `STR` to memory and `LDR` back to register | Register matches stored value ($0x1234$) | **PASS** |
 | **String I/O (`sys_write`)** | Execute `hello.elf`, print string via Linux syscall 64 | "Hello from ARM64 running on Windows via Mini-QEMU!" printed | **PASS** |
+| **Web UI & Debugger API** | Breakpoints, stepping, memory block reads, and program reset | All UI hooks and server tests passing | **PASS** |
 
 ---
 

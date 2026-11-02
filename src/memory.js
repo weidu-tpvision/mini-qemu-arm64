@@ -8,6 +8,8 @@ export class Memory {
   constructor() {
     // Map of pageNumber (address >>> 12) -> Uint8Array(4096)
     this.pages = new Map();
+    // Track addresses written during the latest instruction cycle
+    this.lastWritten = new Set();
   }
 
   // Get or allocate a 4 KB page
@@ -46,10 +48,12 @@ export class Memory {
 
   // Write single byte (8-bit)
   write8(addr, value) {
-    const pageIndex = Math.floor(addr / PAGE_SIZE);
-    const offset = addr & PAGE_MASK;
+    const numAddr = Number(addr);
+    const pageIndex = Math.floor(numAddr / PAGE_SIZE);
+    const offset = numAddr & PAGE_MASK;
     const page = this._getPage(pageIndex, true);
     page[offset] = value & 0xff;
+    this.lastWritten.add(numAddr);
   }
 
   // Read 32-bit little-endian integer
@@ -84,5 +88,22 @@ export class Memory {
     const high = Number((val >> 32n) & 0xffffffffn);
     this.write32(addr, low);
     this.write32(addr + 4, high);
+  }
+
+  // Clear memory and reset pages (used on reset / reloading)
+  clear() {
+    this.pages.clear();
+    this.segments = [];
+    this.lastWritten.clear();
+  }
+
+  // Read consecutive bytes into a Uint8Array (for UI memory hex view)
+  readBlock(addr, length) {
+    const start = Number(addr);
+    const result = new Uint8Array(length);
+    for (let i = 0; i < length; i++) {
+      result[i] = this.read8(start + i);
+    }
+    return result;
   }
 }

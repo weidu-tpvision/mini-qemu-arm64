@@ -1,6 +1,5 @@
 // arm2x86.js - Static Binary Translator (ARM64 ELF -> x86-64 Assembly & Machine Bytes)
 import fs from "fs";
-import path from "path";
 import { Decoder, InstructionType, ConditionCode } from "./decoder.js";
 import { ElfLoader } from "./elf_loader.js";
 import { Memory } from "./memory.js";
@@ -26,10 +25,10 @@ const X86_REG_INDEX = {
 };
 
 export class Arm2X86Translator {
-  constructor(elfPath) {
-    this.elfPath = elfPath;
+  constructor(elfPathOrBuffer, name = null) {
+    this.elfPath = typeof elfPathOrBuffer === "string" ? elfPathOrBuffer : (name || "binary.elf");
     this.memory = new Memory();
-    this.entryPoint = ElfLoader.load(elfPath, this.memory);
+    this.entryPoint = ElfLoader.load(elfPathOrBuffer, this.memory);
   }
 
   // Get x86 register name from ARM register index
@@ -37,8 +36,10 @@ export class Arm2X86Translator {
     return REG_MAP_64[armIndex] || `r${armIndex}`;
   }
 
-  translate() {
-    console.log(`\n[arm2x86] Translating ARM64 binary "${this.elfPath}" into x86-64...`);
+  translate(writeFiles = true) {
+    if (writeFiles) {
+      console.log(`\n[arm2x86] Translating ARM64 binary "${this.elfPath}" into x86-64...`);
+    }
 
     let pc = Number(this.entryPoint);
     const armInstructions = [];
@@ -47,7 +48,7 @@ export class Arm2X86Translator {
     const codeSeg = (this.memory.segments || []).find(s => (s.flags & 1) !== 0);
     const endPC = codeSeg ? (codeSeg.vaddr + codeSeg.filesz) : (pc + 128);
 
-    while (pc < endPC) {
+    while (pc + 4 <= endPC) {
       const raw = this.memory.read32(pc);
       if (raw === 0) break; // Stop at zero-padding or non-code data
       const decoded = Decoder.decode(raw);
@@ -403,27 +404,31 @@ export class Arm2X86Translator {
     }
 
     const fullAsm = asmOutput.join("\n");
-    const baseName = path.basename(this.elfPath, ".elf");
-    fs.mkdirSync("out", { recursive: true });
-    const asmFilename = `out/${baseName}_translated.asm`;
-    const binFilename = `out/${baseName}_translated.bin`;
+    if (writeFiles) {
+      const baseName = String(this.elfPath).replace(/^.*[\\/]/, "").replace(/\.elf$/i, "");
+      fs.mkdirSync("out", { recursive: true });
+      const asmFilename = `out/${baseName}_translated.asm`;
+      const binFilename = `out/${baseName}_translated.bin`;
 
-    fs.writeFileSync(asmFilename, fullAsm);
-    fs.writeFileSync(binFilename, Buffer.from(allX86Bytes));
+      fs.writeFileSync(asmFilename, fullAsm);
+      fs.writeFileSync(binFilename, new Uint8Array(allX86Bytes));
 
-    console.log(`[arm2x86] Successfully generated:`);
-    console.log(`  x86-64 Assembly Source: ${asmFilename}`);
-    console.log(`  Raw x86-64 Machine Code: ${binFilename} (${allX86Bytes.length} bytes)`);
+      console.log(`[arm2x86] Successfully generated:`);
+      console.log(`  x86-64 Assembly Source: ${asmFilename}`);
+      console.log(`  Raw x86-64 Machine Code: ${binFilename} (${allX86Bytes.length} bytes)`);
+    }
 
     return fullAsm;
   }
 }
 
-// Run translation on target ELF (defaults to bin/fib.elf)
-const target = process.argv[2] || "bin/fib.elf";
-const translator = new Arm2X86Translator(target);
-const resultAsm = translator.translate();
+// Run translation on target ELF (defaults to bin/fib.elf) when executed from CLI
+if (typeof process !== "undefined" && process.argv && process.argv[1]?.endsWith("arm2x86.js")) {
+  const target = process.argv[2] || "bin/fib.elf";
+  const translator = new Arm2X86Translator(target);
+  const resultAsm = translator.translate(true);
 
-console.log("\n===================== TRANSLATED x86-64 ASSEMBLY =====================");
-console.log(resultAsm);
-console.log("======================================================================\n");
+  console.log("\n===================== TRANSLATED x86-64 ASSEMBLY =====================");
+  console.log(resultAsm);
+  console.log("======================================================================\n");
+}

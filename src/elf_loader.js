@@ -2,41 +2,36 @@
 import fs from "fs";
 
 export class ElfLoader {
-  static load(filePath, memory) {
-    if (!fs.existsSync(filePath) && fs.existsSync(`bin/${filePath}`)) {
-      filePath = `bin/${filePath}`;
-    }
-    if (!fs.existsSync(filePath)) {
-      throw new Error(`ELF file not found: ${filePath}`);
-    }
-
-    const buffer = fs.readFileSync(filePath);
+  // Parse an ELF64 binary from an in-memory buffer or Uint8Array
+  static loadFromBuffer(buffer, memory, name = "binary.elf") {
+    const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
     // 1. Validate ELF Magic Bytes (0x7F 'E' 'L' 'F')
-    if (buffer[0] !== 0x7f || buffer[1] !== 0x45 || buffer[2] !== 0x4c || buffer[3] !== 0x46) {
+    if (bytes[0] !== 0x7f || bytes[1] !== 0x45 || bytes[2] !== 0x4c || bytes[3] !== 0x46) {
       throw new Error(`Invalid ELF magic bytes: not an ELF binary!`);
     }
 
     // 2. Validate Architecture (64-bit & Little Endian)
-    const elfClass = buffer[4]; // 1 = 32-bit, 2 = 64-bit
-    const elfData = buffer[5];  // 1 = Little Endian, 2 = Big Endian
+    const elfClass = bytes[4]; // 1 = 32-bit, 2 = 64-bit
+    const elfData = bytes[5];  // 1 = Little Endian, 2 = Big Endian
     if (elfClass !== 2) throw new Error(`Unsupported ELF Class: only 64-bit (ELFCLASS64) is supported.`);
     if (elfData !== 1) throw new Error(`Unsupported Endianness: only Little-Endian is supported.`);
 
     // 3. Validate Machine Architecture
-    const e_type = buffer.readUInt16LE(16);
-    const e_machine = buffer.readUInt16LE(18);
+    const e_type = view.getUint16(16, true);
+    const e_machine = view.getUint16(18, true);
     if (e_machine !== 0x00b7) { // 0x00B7 = 183 = EM_AARCH64
       throw new Error(`Unsupported Target Machine: 0x${e_machine.toString(16)}. Expected AArch64 (0xB7).`);
     }
 
     // 4. Extract Entry Point and Program Headers Offset
-    const e_entry = buffer.readBigUInt64LE(24);
-    const e_phoff = Number(buffer.readBigUInt64LE(32));
-    const e_phentsize = buffer.readUInt16LE(54);
-    const e_phnum = buffer.readUInt16LE(56);
+    const e_entry = view.getBigUint64(24, true);
+    const e_phoff = Number(view.getBigUint64(32, true));
+    const e_phentsize = view.getUint16(54, true);
+    const e_phnum = view.getUint16(56, true);
 
-    console.log(`[ELF Loader] Loading "${filePath}"`);
+    console.log(`[ELF Loader] Loading "${name}"`);
     console.log(`  Target Architecture : AArch64 (ARM 64-bit)`);
     console.log(`  Entry Point Address : 0x${e_entry.toString(16).padStart(8, "0")}`);
     console.log(`  Program Headers     : ${e_phnum} entries at offset 0x${e_phoff.toString(16)}`);
@@ -46,17 +41,17 @@ export class ElfLoader {
     let loadedSegments = 0;
     for (let i = 0; i < e_phnum; i++) {
       const phOffset = e_phoff + i * e_phentsize;
-      const p_type = buffer.readUInt32LE(phOffset + 0);
+      const p_type = view.getUint32(phOffset + 0, true);
 
       // p_type == 1 is PT_LOAD (Loadable segment)
       if (p_type === 1) {
-        const p_flags = buffer.readUInt32LE(phOffset + 4);
-        const p_offset = Number(buffer.readBigUInt64LE(phOffset + 8));
-        const p_vaddr = buffer.readBigUInt64LE(phOffset + 16);
-        const p_filesz = Number(buffer.readBigUInt64LE(phOffset + 32));
-        const p_memsz = Number(buffer.readBigUInt64LE(phOffset + 40));
+        const p_flags = view.getUint32(phOffset + 4, true);
+        const p_offset = Number(view.getBigUint64(phOffset + 8, true));
+        const p_vaddr = view.getBigUint64(phOffset + 16, true);
+        const p_filesz = Number(view.getBigUint64(phOffset + 32, true));
+        const p_memsz = Number(view.getBigUint64(phOffset + 40, true));
 
-        const segmentBytes = buffer.subarray(p_offset, p_offset + p_filesz);
+        const segmentBytes = bytes.subarray(p_offset, p_offset + p_filesz);
         memory.loadSegment(p_vaddr, segmentBytes);
 
         const r = (p_flags & 4) ? "R" : "-";
@@ -69,6 +64,7 @@ export class ElfLoader {
           memsz: p_memsz,
           flags: p_flags,
           permissions: `${r}${w}${x}`,
+          data: segmentBytes
         });
 
         console.log(`  Loaded Segment [${i}]: vaddr=0x${p_vaddr.toString(16)} size=${p_filesz}B flags=[${r}${w}${x}]`);
@@ -81,5 +77,22 @@ export class ElfLoader {
     }
 
     return e_entry;
+  }
+
+  // Load from file path (Node.js) or pass through if already a buffer
+  static load(filePathOrBuffer, memory) {
+    if (typeof filePathOrBuffer !== "string") {
+      return ElfLoader.loadFromBuffer(filePathOrBuffer, memory);
+    }
+    let filePath = filePathOrBuffer;
+    if (!fs.existsSync(filePath) && fs.existsSync(`bin/${filePath}`)) {
+      filePath = `bin/${filePath}`;
+    }
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`ELF file not found: ${filePath}`);
+    }
+
+    const buffer = fs.readFileSync(filePath);
+    return ElfLoader.loadFromBuffer(buffer, memory, filePath);
   }
 }

@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mini-QEMU: ARM64 Interactive CPU Emulator &amp; AOT Workbench</title>
+  <link rel="stylesheet" href="/ui/style.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "fs": "/ui/fs_shim.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <!-- Top Navigation & Control Toolbar -->
+  <header>
+    <div class="brand">
+      <span class="brand-badge">ARM64</span>
+      <div>
+        <div class="brand-title">Mini-QEMU Interactive Workbench</div>
+        <div class="brand-subtitle" id="programDescText">64-bit AArch64 User-Space CPU Emulator, Debugger &amp; Binary Translators</div>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <!-- Program Selection -->
+      <div class="control-group">
+        <select id="programSelect" title="Select Precompiled ARM64 Binary">
+          <option value="" disabled selected>Loading binaries...</option>
+        </select>
+        <button class="btn" id="uploadBtn" title="Upload Custom ARM64 ELF Binary">📁 Open ELF</button>
+        <input type="file" id="fileInput" accept=".elf,.bin,*" style="display: none;">
+      </div>
+
+      <!-- Execution Controls -->
+      <div class="control-group">
+        <button class="btn btn-primary" id="runBtn" title="Run / Pause Execution (Space or F5)">▶ Run</button>
+        <button class="btn" id="stepBtn" title="Execute Single Instruction (F10 or S)">↷ Step</button>
+        <button class="btn" id="resetBtn" title="Reset Registers and Memory (R)">↺ Reset</button>
+      </div>
+
+      <!-- Clock Speed Slider -->
+      <div class="speed-control">
+        <span>Clock:</span>
+        <input type="range" id="speedSlider" min="1" max="5" value="3" step="1">
+        <span id="speedLabel" style="font-family: var(--font-mono); width: 68px;">20 Hz</span>
+      </div>
+
+      <!-- State & Cycle Count -->
+      <div class="status-badge status-ready" id="statusBadge">
+        <span class="status-dot"></span>
+        <span id="statusText">READY</span>
+      </div>
+
+      <div class="cycle-box">
+        Cycles: <span id="cycleCounter">0</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Multi-Panel Dashboard -->
+  <main class="main-container">
+    <!-- Panel 1: CPU Registers & Flags -->
+    <section class="panel cpu-panel">
+      <div class="panel-header">
+        <span>CPU State &amp; Registers</span>
+        <span class="header-info">AArch64 ABI</span>
+      </div>
+
+      <!-- Special Registers (PC, SP, FP, LR) - Clickable to inspect memory -->
+      <div class="special-regs-grid">
+        <div class="special-reg-box clickable-reg" id="pcBox" title="Click to view PC in Memory Inspector">
+          <div class="special-reg-label">PROGRAM COUNTER (PC)</div>
+          <div class="special-reg-val" id="pcVal">0x00400000</div>
+        </div>
+        <div class="special-reg-box clickable-reg" id="spBox" title="Click to view Stack (SP) in Memory Inspector">
+          <div class="special-reg-label">STACK POINTER (SP)</div>
+          <div class="special-reg-val" id="spVal">0x00700000</div>
+        </div>
+        <div class="special-reg-box clickable-reg" id="fpBox" title="Click to view Frame Pointer (X29)">
+          <div class="special-reg-label">FRAME POINTER (X29)</div>
+          <div class="special-reg-val" id="fpVal">0x00000000</div>
+        </div>
+        <div class="special-reg-box clickable-reg" id="lrBox" title="Click to view Link Register (X30)">
+          <div class="special-reg-label">LINK REGISTER (X30)</div>
+          <div class="special-reg-val" id="lrVal">0x00000000</div>
+        </div>
+      </div>
+
+      <!-- Condition Flags (NZCV) -->
+      <div class="flags-bar">
+        <span class="flags-title">PSTATE FLAGS (NZCV)</span>
+        <div class="flag-chips">
+          <span class="flag-chip" id="flagN" title="Negative Flag (Bit 31)">N: 0</span>
+          <span class="flag-chip" id="flagZ" title="Zero Flag (Bit 30)">Z: 0</span>
+          <span class="flag-chip" id="flagC" title="Carry / Unsigned No-Borrow Flag (Bit 29)">C: 0</span>
+          <span class="flag-chip" id="flagV" title="Signed Overflow Flag (Bit 28)">V: 0</span>
+        </div>
+      </div>
+
+      <!-- General-Purpose Registers X0 to X30 -->
+      <div class="panel-body">
+        <table class="regs-table">
+          <thead>
+            <tr>
+              <th style="width: 82px;">Register</th>
+              <th>Hexadecimal (64-bit)</th>
+              <th style="text-align: right;">Signed Dec</th>
+            </tr>
+          </thead>
+          <tbody id="regsTableBody">
+            <!-- Populated dynamically by app.js -->
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Panel 2: Disassembly, Pipeline Bar & Binary Translators -->
+    <section class="panel disasm-panel">
+      <div class="panel-header">
+        <div class="tab-group">
+          <button class="tab-btn active" data-tab="disasmView">ARM64 Disassembly</button>
+          <button class="tab-btn" data-tab="x86View">x86-64 Translator</button>
+          <button class="tab-btn" data-tab="aotView">Static AOT (JS)</button>
+        </div>
+        <span class="header-info" id="loadedBinaryInfo">No Binary Loaded</span>
+      </div>
+
+      <!-- Live Fetch-Decode-Execute Pipeline Bar -->
+      <div class="pipeline-bar" id="pipelineBar">
+        <div class="pipeline-stage">
+          <span class="stage-tag tag-fetch">FETCH</span>
+          <span class="mono" id="pipeFetchText">PC=0x00400000 | 0x00000000</span>
+        </div>
+        <div class="pipeline-bits mono" id="pipeBitsText" title="32-bit Little-Endian ARM64 Instruction Encoding">
+          00000000 00000000 00000000 00000000
+        </div>
+        <div class="pipeline-stage">
+          <span class="stage-tag tag-decode" id="pipeTypeBadge">DECODE</span>
+          <span class="mono pipe-disasm" id="pipeDisasmText">—</span>
+          <span class="pipe-sem" id="pipeSemText"></span>
+        </div>
+      </div>
+
+      <!-- View 1: ARM64 Disassembly Table -->
+      <div class="panel-body tab-content active" id="disasmView">
+        <table class="disasm-table">
+          <thead>
+            <tr>
+              <th class="disasm-bp-col" title="Click gutter to toggle breakpoint">●</th>
+              <th style="width: 95px;">Address</th>
+              <th style="width: 86px;">Opcode</th>
+              <th style="width: 190px;">Instruction</th>
+              <th>Semantics &amp; Resolved Target</th>
+            </tr>
+          </thead>
+          <tbody id="disasmTableBody">
+            <!-- Populated dynamically -->
+          </tbody>
+        </table>
+      </div>
+
+      <!-- View 2: Translated x86-64 Assembly -->
+      <div class="panel-body tab-content" id="x86View" style="display: none;">
+        <div class="code-viewer-toolbar">
+          <span>Direct Binary-to-Assembly Translation (ARM64 → Intel x86-64 NASM + Machine Code Bytes)</span>
+        </div>
+        <pre class="code-preview mono" id="x86CodeBlock"></pre>
+      </div>
+
+      <!-- View 3: Static AOT Lifted JavaScript & Live Benchmark -->
+      <div class="panel-body tab-content" id="aotView" style="display: none;">
+        <div class="code-viewer-toolbar">
+          <span>Ahead-Of-Time Lifted JavaScript Module (Zero Decode Overhead)</span>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span id="benchResultBadge" class="bench-badge"></span>
+            <button class="btn btn-primary" id="runBenchBtn" style="padding: 3px 10px; font-size: 11px;">⚡ Benchmark 5,000 Runs</button>
+          </div>
+        </div>
+        <pre class="code-preview mono" id="aotCodeBlock"></pre>
+      </div>
+    </section>
+
+    <!-- Panel 3: Guest Terminal & Syscall Console -->
+    <section class="panel console-panel">
+      <div class="panel-header">
+        <span>Guest Terminal (Linux sys_write &amp; Trace Log)</span>
+        <div style="display: flex; gap: 6px;">
+          <button class="quick-jump-btn" id="clearConsoleBtn">Clear Console</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="terminal-window" id="terminalWindow">
+          <div class="terminal-entry sys-msg">[Mini-QEMU] System initialized. Ready to execute ARM64 binaries.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Panel 4: Memory Hex Inspector & Live Stack Frames -->
+    <section class="panel memory-panel">
+      <div class="panel-header">
+        <div class="tab-group">
+          <button class="mem-tab-btn active" data-memtab="hexView">Memory Hex</button>
+          <button class="mem-tab-btn" data-memtab="stackView">Call Stack (SP)</button>
+        </div>
+        <span class="header-info">4 KB Pages</span>
+      </div>
+
+      <!-- Address jumper & quick buttons -->
+      <div class="mem-toolbar" id="memToolbar">
+        <input type="text" id="memAddrInput" value="0x00400000" placeholder="0x...">
+        <button class="quick-jump-btn" id="memGoBtn">Go</button>
+        <button class="quick-jump-btn" id="memPrevBtn" title="Previous 64 Bytes">▲</button>
+        <button class="quick-jump-btn" id="memNextBtn" title="Next 64 Bytes">▼</button>
+        <div class="quick-jumps">
+          <button class="quick-jump-btn" id="jumpTextBtn" title="Jump to .text Entry Point">.text</button>
+          <button class="quick-jump-btn" id="jumpDataBtn" title="Jump to RAM Data (0x00402000)">RAM</button>
+          <button class="quick-jump-btn" id="jumpStackBtn" title="Jump to Stack Pointer (SP)">SP</button>
+        </div>
+      </div>
+
+      <!-- Tab 1: Hex Grid View -->
+      <div class="panel-body" id="hexView">
+        <table class="hex-table">
+          <thead>
+            <tr>
+              <th style="width: 76px;">Address</th>
+              <th>00 01 02 03 04 05 06 07 &nbsp;08 09 0A 0B 0C 0D 0E 0F</th>
+              <th style="width: 112px;">ASCII</th>
+            </tr>
+          </thead>
+          <tbody id="hexTableBody">
+            <!-- Populated dynamically -->
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Tab 2: Dedicated 64-bit Call Stack & Frame Inspector -->
+      <div class="panel-body" id="stackView" style="display: none;">
+        <table class="regs-table">
+          <thead>
+            <tr>
+              <th style="width: 90px;">Stack Addr</th>
+              <th>64-bit Value (Little-Endian)</th>
+              <th style="text-align: right;">Pointer / Frame</th>
+            </tr>
+          </thead>
+          <tbody id="stackTableBody">
+            <!-- Populated dynamically -->
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="/ui/app.js"></script>
+</body>
+</html>

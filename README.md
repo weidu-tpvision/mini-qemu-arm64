@@ -2,6 +2,8 @@
 
 A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahead-Of-Time (AOT) binary recompiler running on Windows and Linux, built with Node.js.
 
+![Mini-QEMU Web UI & Visual Debugger](docs/ui_preview.svg)
+
 ```
 +---------------------------------------------------------------------------------+
 |                               Mini-QEMU Pipeline                                |
@@ -15,8 +17,9 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 |                        ▼                                                     ▼  |
 |            [ Software Interpreter ]                               [ Static AOT ]|
 |            Fetch -> Decode -> Execute                        Translates ARM -> Host|
-|            - Verbose register trace                          - Zero decode overhead|
-|            - Linux syscall trap (write, exit)                - 80x+ speedup!       |
+|            - Interactive Web Visual Debugger                 - Zero decode overhead|
+|            - Verbose register trace & diffs                  - 80x+ speedup!       |
+|            - Linux syscall trap (write, exit)                                   |
 +---------------------------------------------------------------------------------+
 ```
 
@@ -24,6 +27,14 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 
 ## Features
 
+* **Interactive Web UI & Visual Debugger (`npm run ui`):**
+  * Modern dark-mode visual debugger running natively in any browser.
+  * Live inspection of 31 registers (`X0`–`X30`), `PC`, `SP`, `FP`, `LR`, with changed registers glowing in cyan on every step.
+  * Real-time Condition Code Flags (`NZCV`) visual chips.
+  * Automatic `.text` disassembly with active PC pointer and interactive breakpoint gutters.
+  * 256-byte Memory Hex Inspector with ASCII preview and quick jumps (`.text`, `Stack (SP)`, `Data`).
+  * Linux `sys_write` stdout terminal stream and exit status reporting.
+  * Drag-and-drop custom ARM64 ELF binary loading and adjustable clock speed slider (1 Hz to Max/Turbo).
 * **Architectural CPU State:**
   * 31 64-bit general-purpose registers (`X0`–`X30`) using native 64-bit unsigned integers (`BigUint64Array`).
   * Hardwired Zero Register (`XZR` reads 0, discards writes).
@@ -79,16 +90,25 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 
 ```
 ├── src/                           # Core Emulator & Binary Translators
-│   ├── cpu.js                     # 64-bit virtual CPU registers, flags, and dump formatting
-│   ├── memory.js                  # 4 KB page-based virtual memory manager (little-endian)
+│   ├── cpu.js                     # 64-bit virtual CPU registers, flags, and snapshots
+│   ├── memory.js                  # 4 KB page-based virtual memory manager & write diff tracker
 │   ├── decoder.js                 # ARM64 bitfield instruction decoder (32+ base instructions)
-│   ├── elf_loader.js              # ELF64 binary parser and PT_LOAD segment loader
-│   ├── emulator.js                # Core Fetch-Decode-Execute pipeline & syscall handler
+│   ├── elf_loader.js              # Universal ELF64 binary parser (Node.js & Browser DataView)
+│   ├── emulator.js                # Core Fetch-Decode-Execute pipeline, hooks & breakpoints
 │   ├── static_recompiler.js       # Approach 1: Binary-to-Source (JS) static AOT recompiler
 │   └── arm2x86.js                 # Approach 2: Direct Binary-to-Assembly (x86-64) translator
-├── tests/                         # Unit Test Suite
-│   └── test_decoder.js            # 23+ unit tests for instruction decoding, shifts, and math
-├── tools/                         # ARM64 ELF64 Binary Builders
+├── ui/                            # Interactive Web Visual Debugger & AOT Workbench
+│   ├── index.html                 # Multi-panel dashboard layout with import map
+│   ├── style.css                  # Clean modern dark-mode theme & animations
+│   ├── app.js                     # Browser debugger, pipeline inspector & AOT benchmark runner
+│   └── fs_shim.js                 # Browser module shim for zero-build execution
+├── tests/                         # Automated Test Suite
+│   ├── test_decoder.js            # 23+ unit tests for instruction decoding, shifts, and math
+│   ├── test_ui_api.js             # Unit tests for UI hooks, breakpoints, memory diffs & reset
+│   └── test_server.js             # Integration tests for HTTP dev server & binary streaming
+├── tools/                         # Server, Preview Generator & ELF64 Binary Builders
+│   ├── server.js                  # Zero-dependency Node HTTP dev server (`npm run ui`)
+│   ├── generate_ui_preview.js     # Generates docs/ui_preview.svg and docs/ui_preview.png
 │   ├── elf_builder.js             # Generates standards-compliant bin/fib.elf (iterative)
 │   ├── build_fib_rec_elf.js       # Generates bin/fib_rec.elf (recursive fib(10) with stack frames)
 │   ├── build_hello_elf.js         # Generates bin/hello.elf with embedded string and load/stores
@@ -96,7 +116,7 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 ├── guest/                         # Freestanding C++ Guest Source Code
 │   ├── fib.cpp                    # Iterative Fibonacci source code
 │   ├── fib_rec.cpp                # Recursive Fibonacci source code
-│   └── hello.cpp                  # String output source code
+│   └── hello.cpp                  # String I/O source code
 ├── bin/                           # Compiled 64-bit ARM ELF Executables
 │   ├── fib.elf                    # Iterative Fibonacci(10) = 55
 │   ├── fib_rec.elf                # Recursive Fibonacci(10) = 55
@@ -109,8 +129,10 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── fib_rec_translated.asm     # Translated x86-64 NASM/Intel assembly (fib_rec.elf)
 │   └── *_translated.bin           # Raw x86-64 machine code binaries
 ├── docs/                          # Educational Guides & Architecture Docs
-│   ├── learning.md                # Comprehensive emulator fundamentals & case studies
-│   ├── plan.md                    # 5-phase architectural roadmap & verification matrix
+│   ├── ui_preview.svg             # High-resolution vector preview of the Web UI
+│   ├── ui_preview.png             # Raster PNG preview of the Web UI
+│   ├── learning.md                # Comprehensive emulator fundamentals & 5 case studies
+│   ├── plan.md                    # 6-phase architectural roadmap & verification matrix
 │   └── decoding_and_compilation.md# Deep dive on JIT vs. AOT, I/O thunking, recursion & PyTorch parallel
 ├── package.json                   # Project manifest and npm scripts
 └── README.md                      # This file
@@ -123,21 +145,40 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 ### 1. Prerequisites
 * **Node.js** (v18.0.0 or higher). Verify with `node --version`.
 
-### 2. Run Decoder Unit Tests
-Verifies bitfield extraction, signed immediate math, condition flags, and instruction aliases:
+### 2. Launch the Interactive Web UI & AOT Workbench
+Launch the visual debugger and binary translation workbench in your browser:
+```bash
+npm run ui
+```
+Then open **`http://localhost:3000`** in your browser.
+
+**Web Workbench Features:**
+* **Live Instruction Pipeline & Bitfield Bar:** Displays the `FETCH` address/opcode, 32-bit binary bitfield encoding, `DECODE` instruction category badge, and resolved target semantics for the current `PC`.
+* **Real-time CPU State & ABI Roles:** Live inspection of `X0`–`X30` with AArch64 Linux ABI role labels (`Arg0/Ret`, `Syscall#`, `FP`, `LR`), `PC`, `SP`, and `NZCV` flags, highlighting mutated registers in cyan on every step.
+* **Multi-Tab Code & Translator Views:**
+  * **ARM64 Disassembly:** Interactive instruction stream with clickable breakpoint gutters (`●`), resolved branch target addresses, and automatic `.ascii` embedded string detection.
+  * **x86-64 Translator (`arm2x86`):** Live side-by-side translation of the loaded ARM64 binary into Intel/NASM x86-64 assembly and machine code bytes.
+  * **Static AOT (`static_recompiler`):** Live lifted JavaScript module with a 1-click **⚡ Benchmark 5,000 Runs** button comparing Interpreter vs. AOT execution speed in the browser.
+* **Memory Hex & Call Stack Tabs:**
+  * **Memory Hex (256B):** Live hex dump with ASCII column, byte-write diff highlighting, and quick jumps (`.text`, `RAM`, `SP`).
+  * **Call Stack (`SP`):** 64-bit word stack inspector with live `← SP`, `← FP (X29)`, and `Return Addr` frame badges.
+* **Guest Terminal:** Real-time capture of Linux `sys_write` (syscall 64) output and `sys_exit` status codes.
+* **Keyboard Shortcuts:** <kbd>Space</kbd> / <kbd>F5</kbd> (Run/Pause), <kbd>F10</kbd> / <kbd>S</kbd> (Step), <kbd>R</kbd> (Reset).
+
+### 3. Run Automated Test Suite
+Verifies bitfield instruction decoding, UI hooks, memory write tracking, and HTTP server endpoints:
 ```bash
 npm test
-# or: node tests/test_decoder.js
 ```
 
-### 3. Run the Fibonacci Program in the Interpreter
+### 4. Run the Fibonacci Program in the CLI Interpreter
 Executes [bin/fib.elf](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/bin/fib.elf) step by step, computing the 10th Fibonacci number ($F_{10} = 55$) with cycle tracing:
 ```bash
 npm start
 # or: node src/emulator.js bin/fib.elf
 ```
 
-### 4. Run Function Calls, Stack Frames & Math Program
+### 5. Run Function Calls, Stack Frames & Math Program
 Executes [bin/math_func.elf](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/bin/math_func.elf), testing C++ subroutine calls (`BL`), stack saving/restoring (`STP`/`LDP`), math (`MUL`, `UDIV`), and bitwise XOR (`EOR`):
 ```bash
 node src/emulator.js bin/math_func.elf
@@ -158,7 +199,7 @@ Program terminated cleanly via Linux sys_exit (syscall 93).
 >>> Exit Code (Result in X0): 52 <<<
 ```
 
-### 5. Run Recursive Fibonacci with Pre/Post-Indexed Stack Frames
+### 6. Run Recursive Fibonacci with Pre/Post-Indexed Stack Frames
 Executes [bin/fib_rec.elf](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/bin/fib_rec.elf), computing $\text{fib}(10) = 55$ across **177 recursive `BL`/`RET` calls** (1,503 instruction cycles) using `stp x29, x30, [sp, #-32]!` and `ldp x29, x30, [sp], #32`:
 ```bash
 node src/emulator.js bin/fib_rec.elf --quiet
@@ -168,7 +209,7 @@ node src/emulator.js bin/fib_rec.elf --quiet
 [Mini-QEMU] Completed "bin/fib_rec.elf" in 1503 cycles -> Exit Code (X0): 55
 ```
 
-### 6. Run the String I/O & Memory Program
+### 7. Run the String I/O & Memory Program
 Executes [bin/hello.elf](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/bin/hello.elf), testing `STR`, `LDR`, `ADR`, and printing to the console via Linux `sys_write`:
 ```bash
 node src/emulator.js bin/hello.elf
@@ -184,7 +225,7 @@ Program terminated cleanly via Linux sys_exit (syscall 93).
 >>> Exit Code (Result in X0): 0 <<<
 ```
 
-### 7. Run the Static AOT Recompiler & Benchmark (Approach 1)
+### 8. Run the Static AOT Recompiler & Benchmark (Approach 1)
 Statically lifts `bin/fib.elf` into structured JavaScript (`runNative` in [out/fib_recompiled.js](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/out/fib_recompiled.js)) and benchmarks 10,000 iterations:
 ```bash
 npm run recompile
@@ -198,7 +239,7 @@ Static Recompiled Result: 55 in 6.99 ms
 Speedup Factor          : 19.0x FASTER with Static AOT!
 ```
 
-### 8. Run the ARM64-to-x86 Static Binary Translator (Approach 2)
+### 9. Run the ARM64-to-x86 Static Binary Translator (Approach 2)
 Directly translates an ARM64 ELF binary (`bin/fib.elf`, `bin/math_func.elf`, or `bin/fib_rec.elf`) into **native x86-64 Intel/NASM Assembly** and **raw x86 machine bytes** in `out/`:
 ```bash
 npm run translate

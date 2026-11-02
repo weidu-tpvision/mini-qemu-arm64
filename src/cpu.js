@@ -64,4 +64,33 @@ export class CPU {
     const flags = `[N:${this.flags.N ? 1 : 0} Z:${this.flags.Z ? 1 : 0} C:${this.flags.C ? 1 : 0} V:${this.flags.V ? 1 : 0}]`;
     return `PC=${pcHex} | ${x0} ${x1} ${x2} ${x3} ${lr} | Flags: ${flags}`;
   }
+
+  // Reset all registers, flags, and CPU state
+  reset() {
+    this.x.fill(0n);
+    this.sp = 0x00700000n;
+    this.pc = 0n;
+    this.flags.N = false;
+    this.flags.Z = false;
+    this.flags.C = false;
+    this.flags.V = false;
+    this.halted = false;
+    this.exitCode = 0;
+  }
+
+  // Snapshot full CPU state for UI rendering
+  getSnapshot() {
+    const regs = [];
+    for (let i = 0; i < 31; i++) {
+      regs.push(this.x[i]);
+    }
+    return {
+      regs,
+      sp: this.sp,
+      pc: this.pc,
+      flags: { ...this.flags },
+      halted: this.halted,
+      exitCode: this.exitCode
+    };
+  }
 }

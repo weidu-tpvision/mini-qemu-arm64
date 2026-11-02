@@ -4,7 +4,8 @@
   "type": "module",
   "description": "Educational ARM64 (AArch64) User-Space CPU Emulator & Binary Translators",
   "scripts": {
-    "test": "node tests/test_decoder.js",
+    "test": "node tests/test_decoder.js && node tests/test_ui_api.js && node tests/test_server.js",
+    "ui": "node tools/server.js",
     "start": "node src/emulator.js bin/fib.elf",
     "recompile": "node src/static_recompiler.js",
     "translate": "node src/arm2x86.js bin/fib.elf",
