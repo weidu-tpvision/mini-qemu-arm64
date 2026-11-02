@@ -172,13 +172,13 @@ When developers discuss "statically compiling foreign binaries", there are two c
 
 ### Flavor A: Binary-to-Source Decompilation (High-Level Lifting)
 * **What it does:** Lifts raw machine instructions into high-level source code (C, C++, or JavaScript).
-* **Our Implementation:** [static_recompiler.js](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/static_recompiler.js) produces `fib_recompiled.js`.
+* **Our Implementation:** [static_recompiler.js](../src/static_recompiler.js) produces `fib_recompiled.js`.
 * **Why it is widely used:** By targeting C or JavaScript, you let an existing optimizing compiler (GCC, Clang, or V8) do the register allocation, loop unrolling, and dead-code elimination.
 * **Famous Examples:** `N64Recomp` (statically recompiled *Zelda: Majora's Mask* to native PC C++), *Sonic CD* decompilation.
 
 ### Flavor B: Direct Binary-to-Assembly / Binary-to-Binary Translation
 * **What it does:** Directly maps foreign registers and opcodes to host registers and opcodes, emitting native host assembly (`.asm`) and raw host machine bytes (`.bin` / `.exe`).
-* **Our Implementation:** [arm2x86.js](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/arm2x86.js) maps ARM64 registers ($X_0 \to \text{RAX}$, $X_1 \to \text{RBX}$, $X_2 \to \text{RCX}$) and emits annotated x86-64 assembly instructions and raw bytes with two-pass relative branch displacement patching.
+* **Our Implementation:** [arm2x86.js](../src/arm2x86.js) maps ARM64 registers ($X_0 \to \text{RAX}$, $X_1 \to \text{RBX}$, $X_2 \to \text{RCX}$) and emits annotated x86-64 assembly instructions and raw bytes with two-pass relative branch displacement patching.
 * **Why it is used:** No high-level language intermediary is required; operates directly at the machine instruction layer.
 * **Famous Examples:** Apple Rosetta 2 AOT translation cache, DEC FX!32.
 
@@ -211,7 +211,7 @@ In bare-metal console or full-system emulation (e.g., PS4/Switch/Raspberry Pi), 
 
 ## 8. How Recursion & Stack Frames Work in Emulation vs. Binary Translation
 
-In [`guest/fib_rec.cpp`](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/guest/fib_rec.cpp) (compiled into [`fib_rec.elf`](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/fib_rec.elf)), we compute $\text{fib}(10) = 55$ recursively across **177 nested function calls**:
+In [`guest/fib_rec.cpp`](../guest/fib_rec.cpp) (compiled into [`bin/fib_rec.elf`](../bin/fib_rec.elf)), we compute $\text{fib}(10) = 55$ recursively across **177 nested function calls**:
 
 ```armasm
 fib:
@@ -235,7 +235,7 @@ recursive_step:
 
 ### Why the Interpreter (`emulator.js`) Handles Recursion Effortlessly
 In the software interpreter, recursion works out-of-the-box with zero special cases:
-1. `SP` starts at `0x00700000` in our 4 KB page-based virtual memory ([`memory.js`](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/memory.js)).
+1. `SP` starts at `0x00700000` in our 4 KB page-based virtual memory ([`src/memory.js`](../src/memory.js)).
 2. Each recursive step executes `stp x29, x30, [sp, #-32]!`, which decrements `SP` by 32 bytes and writes the caller's 64-bit `X29` (`FP`) and `X30` (`LR`) into virtual RAM.
 3. Local variables (`n` and `fib(n-1)`) live safely in each call's private 32-byte stack frame (`[sp, #16]` and `[sp, #24]`).
 4. When unwinding, `ldp x29, x30, [sp], #32` pops the saved return address back into `X30` and increments `SP` by 32, and `ret` sets `PC = X30`.
@@ -254,5 +254,5 @@ When translating recursive ARM64 code to native x86-64, there is a fundamental *
    * Because ARM instructions are always 4 bytes (`0x0040002c`) while translated x86 instructions have variable byte lengths (1 to 14 bytes), the address stored in `X30` on the guest stack is an **ARM virtual address** (`0x0040002c`), **not** a native x86 host instruction pointer!
    * **How Real Translators (Rosetta 2 / QEMU TCG) Solve This:**
      * **Approach A (Emulated Link Register + Return Stack Buffer):** Instead of emitting native x86 `ret` blindly, `BL` sets `R11` (`X30`) to the guest ARM return address (`0x0040002c`) and pushes a predicted pair `(guest_LR, host_RIP)` onto a **Shadow Return Stack**. When `RET` executes, it checks if `R11` still matches `guest_LR` on top of the shadow stack; if so, it executes a fast native `ret`! If not (e.g., `longjmp` or exception unwinding modified the stack), it falls back to a runtime hash table lookup (`guestPCToHostRIP[R11]`).
-     * **Approach B (Direct Native `CALL`/`RET` when ABI-safe):** In static translators like our [`arm2x86.js`](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/arm2x86.js), if `X30` (`r11`) is only ever saved/restored by paired `STP`/`LDP` and never arithmetic-modified, translating `BL` $\to$ `call` and `RET` $\to$ `ret` uses the native x86 hardware return stack directly!
+     * **Approach B (Direct Native `CALL`/`RET` when ABI-safe):** In static translators like our [`src/arm2x86.js`](../src/arm2x86.js), if `X30` (`r11`) is only ever saved/restored by paired `STP`/`LDP` and never arithmetic-modified, translating `BL` $\to$ `call` and `RET` $\to$ `ret` uses the native x86 hardware return stack directly!
 

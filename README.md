@@ -172,14 +172,14 @@ npm test
 ```
 
 ### 4. Run the Fibonacci Program in the CLI Interpreter
-Executes [bin/fib.elf](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/bin/fib.elf) step by step, computing the 10th Fibonacci number ($F_{10} = 55$) with cycle tracing:
+Executes [bin/fib.elf](bin/fib.elf) step by step, computing the 10th Fibonacci number ($F_{10} = 55$) with cycle tracing:
 ```bash
 npm start
 # or: node src/emulator.js bin/fib.elf
 ```
 
 ### 5. Run Function Calls, Stack Frames & Math Program
-Executes [bin/math_func.elf](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/bin/math_func.elf), testing C++ subroutine calls (`BL`), stack saving/restoring (`STP`/`LDP`), math (`MUL`, `UDIV`), and bitwise XOR (`EOR`):
+Executes [bin/math_func.elf](bin/math_func.elf), testing C++ subroutine calls (`BL`), stack saving/restoring (`STP`/`LDP`), math (`MUL`, `UDIV`), and bitwise XOR (`EOR`):
 ```bash
 node src/emulator.js bin/math_func.elf
 ```
@@ -200,7 +200,7 @@ Program terminated cleanly via Linux sys_exit (syscall 93).
 ```
 
 ### 6. Run Recursive Fibonacci with Pre/Post-Indexed Stack Frames
-Executes [bin/fib_rec.elf](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/bin/fib_rec.elf), computing $\text{fib}(10) = 55$ across **177 recursive `BL`/`RET` calls** (1,503 instruction cycles) using `stp x29, x30, [sp, #-32]!` and `ldp x29, x30, [sp], #32`:
+Executes [bin/fib_rec.elf](bin/fib_rec.elf), computing $\text{fib}(10) = 55$ across **177 recursive `BL`/`RET` calls** (1,503 instruction cycles) using `stp x29, x30, [sp, #-32]!` and `ldp x29, x30, [sp], #32`:
 ```bash
 node src/emulator.js bin/fib_rec.elf --quiet
 ```
@@ -210,7 +210,7 @@ node src/emulator.js bin/fib_rec.elf --quiet
 ```
 
 ### 7. Run the String I/O & Memory Program
-Executes [bin/hello.elf](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/bin/hello.elf), testing `STR`, `LDR`, `ADR`, and printing to the console via Linux `sys_write`:
+Executes [bin/hello.elf](bin/hello.elf), testing `STR`, `LDR`, `ADR`, and printing to the console via Linux `sys_write`:
 ```bash
 node src/emulator.js bin/hello.elf
 ```
@@ -226,7 +226,7 @@ Program terminated cleanly via Linux sys_exit (syscall 93).
 ```
 
 ### 8. Run the Static AOT Recompiler & Benchmark (Approach 1)
-Statically lifts `bin/fib.elf` into structured JavaScript (`runNative` in [out/fib_recompiled.js](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/out/fib_recompiled.js)) and benchmarks 10,000 iterations:
+Statically lifts `bin/fib.elf` into structured JavaScript (`runNative` in [out/fib_recompiled.js](out/fib_recompiled.js)) and benchmarks 10,000 iterations:
 ```bash
 npm run recompile
 # or: node src/static_recompiler.js
@@ -248,7 +248,7 @@ node src/arm2x86.js bin/fib.elf
 node src/arm2x86.js bin/math_func.elf
 node src/arm2x86.js bin/fib_rec.elf
 ```
-**Generated [out/fib_translated.asm](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/out/fib_translated.asm):**
+**Generated [out/fib_translated.asm](out/fib_translated.asm):**
 ```nasm
 global _start
 section .text
@@ -272,6 +272,6 @@ label_1_0x40000c:
 
 ## Documentation & Reading Guides
 
-* **[docs/learning.md](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/docs/learning.md):** The 4 paradigms of emulation (API compatibility layers, hardware virtualization, JIT binary translation, software interpretation) with case studies of the PS5, Nintendo Switch, Android Emulator, and QEMU.
-* **[docs/plan.md](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/docs/plan.md):** The original 5-phase implementation plan and test verification matrix.
-* **[docs/decoding_and_compilation.md](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/docs/decoding_and_compilation.md):** Why an interpreter simulates semantics without emitting host assembly, why offline static compilation encounters the computed goto / literal pool problems, how I/O syscall thunking and recursive stack frames work, and how this directly parallels PyTorch graph compilation (`torch.jit.trace` vs. `torch.compile`).
+* **[docs/learning.md](docs/learning.md):** The 4 paradigms of emulation (API compatibility layers, hardware virtualization, JIT binary translation, software interpretation) with case studies of the PS5, Nintendo Switch, Android Emulator, and QEMU.
+* **[docs/plan.md](docs/plan.md):** The original 5-phase implementation plan and test verification matrix.
+* **[docs/decoding_and_compilation.md](docs/decoding_and_compilation.md):** Why an interpreter simulates semantics without emitting host assembly, why offline static compilation encounters the computed goto / literal pool problems, how I/O syscall thunking and recursive stack frames work, and how this directly parallels PyTorch graph compilation (`torch.jit.trace` vs. `torch.compile`).

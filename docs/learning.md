@@ -149,7 +149,7 @@ loop:
 During this project, we implemented both major paradigms of Ahead-Of-Time static compilation:
 
 ### Approach 1: Binary-to-Source Lifting (`static_recompiler.js`)
-* **How it works:** Reads the ARM instructions from an ELF binary, detects backward-branch loops (`b.ne` with negative offset), and lifts them into structured JavaScript (`do { ... } while (!flagZ);`) inside [`fib_recompiled.js`](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/fib_recompiled.js).
+* **How it works:** Reads the ARM instructions from an ELF binary, detects backward-branch loops (`b.ne` with negative offset), and lifts them into structured JavaScript (`do { ... } while (!flagZ);`) inside [`out/fib_recompiled.js`](../out/fib_recompiled.js).
 * **The Benefit:** You let an existing optimizing compiler (Clang, GCC, or Node.js V8) handle register allocation, loop unrolling, and dead code elimination.
 * **Result:** **~20x–80x speedup** over software interpretation!
 * **Industry Examples:** `N64Recomp` (statically decompiles N64 games into PC source code), *Sonic CD* decompilation.
@@ -171,7 +171,7 @@ During this project, we implemented both major paradigms of Ahead-Of-Time static
 
 ## 7. Case Study: Recursive Fibonacci (`fib_rec.elf`)
 
-To see how leaf base cases and non-leaf recursive stack frames work together, [`guest/fib_rec.cpp`](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/guest/fib_rec.cpp) (built via [`tools/build_fib_rec_elf.js`](file:///c:/Users/wei.du/WorkAtTPVision/test/emulator/tools/build_fib_rec_elf.js)) computes $\text{fib}(10) = 55$ recursively:
+To see how leaf base cases and non-leaf recursive stack frames work together, [`guest/fib_rec.cpp`](../guest/fib_rec.cpp) (built via [`tools/build_fib_rec_elf.js`](../tools/build_fib_rec_elf.js)) computes $\text{fib}(10) = 55$ recursively:
 * **Base case ($n \le 1$):** Executes `cmp x0, #1`, `b.gt`, and `ret` directly without allocating a stack frame (a **leaf return**).
 * **Recursive case ($n > 1$):**
   1. Executes `stp x29, x30, [sp, #-32]!` (**pre-indexed writeback**) to decrement `SP` by 32 bytes and save `FP` (`X29`) and `LR` (`X30`).
