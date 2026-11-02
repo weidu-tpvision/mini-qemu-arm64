@@ -1,0 +1,13 @@
+{
+  "name": "mini-qemu-arm64",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Educational ARM64 (AArch64) User-Space CPU Emulator & Binary Translators",
+  "scripts": {
+    "test": "node tests/test_decoder.js",
+    "start": "node src/emulator.js bin/fib.elf",
+    "recompile": "node src/static_recompiler.js",
+    "translate": "node src/arm2x86.js bin/fib.elf",
+    "build-elfs": "node tools/elf_builder.js && node tools/build_hello_elf.js && node tools/build_math_elf.js && node tools/build_fib_rec_elf.js"
+  }
+}
