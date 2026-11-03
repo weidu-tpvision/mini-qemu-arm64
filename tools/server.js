@@ -70,6 +70,12 @@ const BINARY_DESCRIPTIONS = {
     title: "Interactive Canvas Painter & Gamepad",
     desc: "Interactive MMIO input & 60 FPS graphics: Move cursor with Arrow Keys/WASD, Paint with Space/Mouse, change colors with Shift, clear with R.",
     category: "Graphics & Interactive Input"
+  },
+  "dynamic_memory.elf": {
+    name: "dynamic_memory.elf",
+    title: "Dynamic Memory Allocator (malloc/free)",
+    desc: "Boundary-tag memory allocator: malloc, free, hole reuse without brk advance, and adjacent free block coalescing over sys_brk (214).",
+    category: "Memory Management & Allocators"
   }
 };
 

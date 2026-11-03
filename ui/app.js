@@ -60,11 +60,20 @@ const memNextBtn = document.getElementById("memNextBtn");
 const jumpTextBtn = document.getElementById("jumpTextBtn");
 const jumpStackBtn = document.getElementById("jumpStackBtn");
 const jumpDataBtn = document.getElementById("jumpDataBtn");
+const jumpHeapBtn = document.getElementById("jumpHeapBtn");
 const jumpVramBtn = document.getElementById("jumpVramBtn");
 const jumpVramHexBtn = document.getElementById("jumpVramHexBtn");
 const clearScreenBtn = document.getElementById("clearScreenBtn");
 const hexTableBody = document.getElementById("hexTableBody");
 const stackTableBody = document.getElementById("stackTableBody");
+
+// Dynamic Heap Allocator Elements
+const heapBrkVal = document.getElementById("heapBrkVal");
+const heapAllocVal = document.getElementById("heapAllocVal");
+const heapFreeVal = document.getElementById("heapFreeVal");
+const heapPagesVal = document.getElementById("heapPagesVal");
+const heapVisualStrip = document.getElementById("heapVisualStrip");
+const heapTableBody = document.getElementById("heapTableBody");
 
 // Level 1 MMIO Virtual Screen Elements & Framebuffer State
 const memToolbar = document.getElementById("memToolbar");
@@ -639,6 +648,11 @@ function isInteractiveBinary(filename = "") {
   return f.includes("interactive") || f.includes("paint") || f.includes("game");
 }
 
+function isHeapBinary(filename = "") {
+  const f = filename.toLowerCase();
+  return f.includes("heap") || f.includes("dynamic") || f.includes("malloc") || f.includes("alloc");
+}
+
 function runUntilFrameOrHalt(emuInstance, maxCycles = 2000000) {
   let steps = 0;
   while (!emuInstance.cpu.halted && steps < maxCycles) {
@@ -659,15 +673,77 @@ function switchMemoryTab(tabId) {
     c.style.display = c.id === tabId ? "block" : "none";
   });
   if (memToolbar) {
-    memToolbar.style.display = tabId === "hexView" ? "flex" : "none";
+    memToolbar.style.display = (tabId === "hexView" || tabId === "heapView") ? "flex" : "none";
   }
   if (vramHeaderBadge) {
     vramHeaderBadge.textContent =
       tabId === "screenView" ? "320×240 RGBA" :
-      tabId === "stackView" ? "64-bit Frames" : "4 KB Pages";
+      tabId === "stackView" ? "64-bit Frames" :
+      tabId === "heapView" ? "Dynamic Heap" : "4 KB Pages";
   }
   if (tabId === "screenView") {
     renderVramScreen(true);
+  } else if (tabId === "heapView") {
+    updateHeapView();
+  }
+}
+
+function updateHeapView() {
+  if (!heapBrkVal) return;
+  const stats = emulator.getHeapStats();
+  heapBrkVal.textContent = `0x${stats.brk.toString(16).padStart(8, "0")}`;
+  heapAllocVal.textContent = `${stats.allocatedBytes.toLocaleString()} B (${stats.allocatedCount} chunks)`;
+  heapFreeVal.textContent = `${stats.freeBytes.toLocaleString()} B (${stats.freeCount} holes)`;
+  heapPagesVal.textContent = `${stats.pageCount} (${Math.round(stats.mappedBytes / 1024)} KB)`;
+
+  if (heapVisualStrip) {
+    heapVisualStrip.innerHTML = "";
+    if (stats.chunks.length === 0) {
+      heapVisualStrip.innerHTML = `<span style="color: var(--text-muted); font-size: 11px; align-self: center; margin: auto;">No heap allocations yet (brk = 0x${stats.heapStart.toString(16)}). Run program to allocate memory.</span>`;
+    } else {
+      stats.chunks.forEach(c => {
+        const box = document.createElement("div");
+        const isAlloc = c.isAllocated;
+        box.className = `heap-chunk-box ${isAlloc ? "heap-chunk-alloc" : "heap-chunk-free"}`;
+        const widthPx = Math.max(54, Math.min(220, Math.round(c.size * 1.2)));
+        box.style.width = `${widthPx}px`;
+        const label = isAlloc ? "ALLOC" : "FREE";
+        const addrHex = `0x${c.addr.toString(16)}`;
+        box.title = `Chunk @ ${addrHex} • Size: ${c.size}B (Payload: ${c.payloadSize}B) • ${label} (Click to inspect in Hex)`;
+        box.innerHTML = `<span style="font-weight: 700;">${label}</span><span>${c.size}B</span>`;
+        box.addEventListener("click", () => {
+          switchMemoryTab("hexView");
+          updateMemoryGrid(c.addr);
+        });
+        heapVisualStrip.appendChild(box);
+      });
+    }
+  }
+
+  if (heapTableBody) {
+    heapTableBody.innerHTML = "";
+    if (stats.chunks.length === 0) {
+      heapTableBody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 14px;">No heap chunks recorded.</td></tr>`;
+    } else {
+      stats.chunks.forEach(c => {
+        const isAlloc = c.isAllocated;
+        const tr = document.createElement("tr");
+        tr.style.cursor = "pointer";
+        tr.title = "Click to inspect chunk header in Memory Hex view";
+        tr.innerHTML = `
+          <td class="hex-addr">0x${c.addr.toString(16).padStart(8, "0")}</td>
+          <td><span class="heap-badge ${isAlloc ? "badge-alloc" : "badge-free"}">${isAlloc ? "ALLOC" : "FREE"}</span></td>
+          <td style="color: var(--text-primary); font-weight: 600;">${c.size} B</td>
+          <td style="color: ${isAlloc ? "var(--accent-cyan)" : "var(--text-muted)"};">${c.payloadSize} B</td>
+          <td class="mono" style="color: ${isAlloc ? "var(--accent-amber)" : "var(--text-muted)"};">0x${c.payloadAddr.toString(16).padStart(8, "0")}</td>
+        `;
+        tr.addEventListener("click", () => {
+          switchMemoryTab("hexView");
+          updateMemoryGrid(c.addr);
+        });
+        heapTableBody.appendChild(tr);
+      });
+    }
   }
 }
 
@@ -711,6 +787,7 @@ function instantRenderFrame() {
   updateCPUState();
   updateDisassemblyPointer();
   updateMemoryGrid(currentMemAddr);
+  updateHeapView();
   renderVramScreen(true);
   appendTerminal(`[Screen] Frame rendered in ${elapsed} ms (+${frameCycles.toLocaleString()} cycles, total ${emulator.cycleCount.toLocaleString()}).\n`);
 }
@@ -735,6 +812,7 @@ function stepSingle() {
   updateCPUState(res.changedRegs);
   updateDisassemblyPointer();
   updateMemoryGrid(currentMemAddr);
+  updateHeapView();
   renderVramScreen();
 
   if (res.halted) {
@@ -823,6 +901,7 @@ function stopRunning() {
   if (!emulator.cpu.halted) {
     setStatus("PAUSED", "PAUSED", "status-paused");
   }
+  updateHeapView();
   renderVramScreen(true);
 }
 
@@ -837,6 +916,7 @@ function resetEmulator() {
   updateCPUState();
   updateDisassemblyPointer();
   updateMemoryGrid(currentMemAddr);
+  updateHeapView();
   renderVramScreen(true);
   setStatus("READY", "READY", "status-ready");
   appendTerminal(`[Mini-QEMU] Reset to entry point 0x${emulator.cpu.pc.toString(16).padStart(8, "0")}.\n`);
@@ -893,6 +973,9 @@ function loadBinaryBuffer(buffer, filename, desc = "") {
     speedLabel.textContent = SPEED_LEVELS["5"].label;
     switchMemoryTab("screenView");
     if (runBenchBtn) runBenchBtn.textContent = "⚡ Benchmark 3 Frames";
+  } else if (isHeapBinary(filename)) {
+    switchMemoryTab("heapView");
+    if (runBenchBtn) runBenchBtn.textContent = "⚡ Benchmark 5,000 Runs";
   } else {
     if (runBenchBtn) runBenchBtn.textContent = "⚡ Benchmark 5,000 Runs";
   }
@@ -1042,6 +1125,13 @@ memNextBtn.addEventListener("click", () => updateMemoryGrid(currentMemAddr + 64)
 jumpTextBtn.addEventListener("click", () => updateMemoryGrid(Number(emulator.entryPoint || 0x00400000)));
 jumpDataBtn.addEventListener("click", () => updateMemoryGrid(0x00402000));
 jumpStackBtn.addEventListener("click", () => updateMemoryGrid(Number(emulator.cpu.sp) - 32));
+
+if (jumpHeapBtn) {
+  jumpHeapBtn.addEventListener("click", () => {
+    switchMemoryTab("hexView");
+    updateMemoryGrid(Number(emulator.heapStart || 0x00500000));
+  });
+}
 
 if (jumpVramBtn) {
   jumpVramBtn.addEventListener("click", () => {

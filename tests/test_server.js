@@ -52,7 +52,10 @@ try {
   const graphicsBin = binaries.find(b => b.filename === "graphics_pattern.elf");
   assert.ok(graphicsBin, "graphics_pattern.elf must be in the list");
   assert.strictEqual(graphicsBin.category, "Graphics & Framebuffer");
-  console.log(`[PASS] /api/binaries returned ${binaries.length} binaries including graphics catalog`);
+  const dynMemBin = binaries.find(b => b.filename === "dynamic_memory.elf");
+  assert.ok(dynMemBin, "dynamic_memory.elf must be in the list");
+  assert.strictEqual(dynMemBin.category, "Memory Management & Allocators");
+  console.log(`[PASS] /api/binaries returned ${binaries.length} binaries including graphics & memory catalogs`);
 
   // 2. Test /bin/fib.elf raw binary download
   const binRes = await fetchUrl("/bin/fib.elf");

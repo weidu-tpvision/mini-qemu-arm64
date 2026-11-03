@@ -25,6 +25,7 @@ export class MiniQEMU {
     this.heapStart = 0x00500000n;
     this.brk = 0x00500000n;
     this.mmapCurrent = 0x10000000n;
+    this.mmapRegions = new Map();
     this.onRead = null;
     this.stdinQueue = [];
 
@@ -170,6 +171,7 @@ export class MiniQEMU {
     this.heapStart = (maxAddr + 4095n) & ~4095n;
     this.brk = this.heapStart;
     this.mmapCurrent = 0x10000000n;
+    this.mmapRegions.clear();
     this.stdinQueue = [];
     this.fds.clear();
     this.nextFd = 3;
@@ -1101,13 +1103,22 @@ export class MiniQEMU {
             // Return current program break
             this.cpu.setReg(0, this.brk);
           } else {
-            // Expand heap to requested address
+            if (requestedBrk < this.brk) {
+              // Contraction: free pages between requestedBrk and this.brk
+              const shrinkLen = Number(this.brk - requestedBrk);
+              this.memory.freeRange(Number(requestedBrk), shrinkLen);
+            }
+            // Expand or update heap to requested address
             this.brk = requestedBrk;
             this.cpu.setReg(0, this.brk);
           }
         } else if (syscallNum === 222) { // sys_mmap(addr, length, prot, flags, fd, offset)
           const addr = this.cpu.getReg(0);
           const len = this.cpu.getReg(1);
+          const prot = Number(this.cpu.getReg(2));
+          const flags = Number(this.cpu.getReg(3));
+          const fd = Number(this.cpu.getReg(4));
+          const offset = Number(this.cpu.getReg(5));
           // Allocate page-aligned chunk from mmap space
           const alignedLen = (len + 4095n) & ~4095n;
           let allocAddr = addr;
@@ -1115,8 +1126,22 @@ export class MiniQEMU {
             allocAddr = this.mmapCurrent;
             this.mmapCurrent += alignedLen;
           }
+          this.mmapRegions.set(Number(allocAddr), {
+            addr: Number(allocAddr),
+            len: Number(alignedLen),
+            prot,
+            flags,
+            fd,
+            offset
+          });
           this.cpu.setReg(0, allocAddr);
-        } else if (syscallNum === 215 || syscallNum === 226) { // sys_munmap (215), sys_mprotect (226)
+        } else if (syscallNum === 215) { // sys_munmap(addr, length)
+          const addr = Number(this.cpu.getReg(0));
+          const len = Number(this.cpu.getReg(1));
+          this.memory.freeRange(addr, len);
+          this.mmapRegions.delete(addr);
+          this.cpu.setReg(0, 0n);
+        } else if (syscallNum === 226) { // sys_mprotect
           this.cpu.setReg(0, 0n);
         } else if (syscallNum === 113) { // sys_clock_gettime(clk_id, tp)
           const tpAddr = Number(this.cpu.getReg(1));
@@ -1263,6 +1288,103 @@ export class MiniQEMU {
       console.log("==========================================================================================");
     }
     return this.cpu.exitCode;
+  }
+
+  // Inspect and parse dynamic heap chunk headers between heapStart and brk
+  getHeapChunks() {
+    const chunks = [];
+    const heapStart = Number(this.heapStart);
+    const brk = Number(this.brk);
+    if (brk <= heapStart) return chunks;
+
+    let addr = heapStart;
+    const safetyLimit = 2000;
+    let iterations = 0;
+
+    while (addr < brk && iterations++ < safetyLimit) {
+      const header = this.memory.read64(addr);
+      if (header === 0n) {
+        // Zero header: unallocated or unformatted remainder of the heap page
+        const remSize = brk - addr;
+        chunks.push({
+          addr,
+          size: remSize,
+          isAllocated: false,
+          payloadAddr: addr,
+          payloadSize: remSize,
+          isRemainder: true
+        });
+        break;
+      }
+
+      const isAllocated = (header & 1n) !== 0n;
+      const chunkSize = Number(header & ~1n);
+
+      if (chunkSize < 8 || chunkSize > Math.max(4096, brk - addr + 4096)) {
+        // Non-standard or raw unformatted heap memory
+        const remSize = brk - addr;
+        chunks.push({
+          addr,
+          size: remSize,
+          isAllocated: true,
+          payloadAddr: addr,
+          payloadSize: remSize,
+          isRaw: true
+        });
+        break;
+      }
+
+      chunks.push({
+        addr,
+        size: chunkSize,
+        isAllocated,
+        payloadAddr: addr + 8,
+        payloadSize: Math.max(0, chunkSize - 8),
+        isRemainder: false
+      });
+
+      addr += chunkSize;
+    }
+
+    return chunks;
+  }
+
+  // Aggregate dynamic memory statistics (heap, mmap regions, page allocation)
+  getHeapStats() {
+    const heapStart = Number(this.heapStart);
+    const brk = Number(this.brk);
+    const heapSize = Math.max(0, brk - heapStart);
+    const chunks = this.getHeapChunks();
+
+    let allocatedBytes = 0;
+    let freeBytes = 0;
+    let allocatedCount = 0;
+    let freeCount = 0;
+
+    for (const c of chunks) {
+      if (c.isAllocated) {
+        allocatedBytes += c.payloadSize;
+        allocatedCount++;
+      } else {
+        freeBytes += c.size;
+        freeCount++;
+      }
+    }
+
+    return {
+      heapStart,
+      brk,
+      heapSize,
+      mmapCurrent: Number(this.mmapCurrent),
+      mmapRegions: Array.from(this.mmapRegions.values()),
+      pageCount: this.memory.getPageCount(),
+      mappedBytes: this.memory.getMappedBytes(),
+      chunks,
+      allocatedBytes,
+      freeBytes,
+      allocatedCount,
+      freeCount
+    };
   }
 }
 

@@ -204,6 +204,7 @@
         <div class="tab-group">
           <button class="mem-tab-btn active" data-memtab="hexView">Memory Hex</button>
           <button class="mem-tab-btn" data-memtab="stackView">Call Stack</button>
+          <button class="mem-tab-btn" data-memtab="heapView">Heap Allocator</button>
           <button class="mem-tab-btn" data-memtab="screenView">📺 Display</button>
         </div>
         <span class="header-info" id="vramHeaderBadge">4 KB Pages</span>
@@ -218,6 +219,7 @@
         <div class="quick-jumps">
           <button class="quick-jump-btn" id="jumpTextBtn" title="Jump to .text Entry Point">.text</button>
           <button class="quick-jump-btn" id="jumpDataBtn" title="Jump to RAM Data (0x00402000)">RAM</button>
+          <button class="quick-jump-btn" id="jumpHeapBtn" title="Jump to Heap Start (0x00500000)">Heap</button>
           <button class="quick-jump-btn" id="jumpVramBtn" title="Jump to VRAM Framebuffer (0x00800000)">VRAM</button>
           <button class="quick-jump-btn" id="jumpStackBtn" title="Jump to Stack Pointer (SP)">SP</button>
         </div>
@@ -253,6 +255,60 @@
             <!-- Populated dynamically -->
           </tbody>
         </table>
+      </div>
+
+      <!-- Tab 3: Dynamic Heap Allocator & Visual Chunk Map -->
+      <div class="panel-body mem-tab-content" id="heapView" style="display: none;">
+        <div class="heap-container">
+          <div class="heap-metrics-bar">
+            <div class="heap-metric-card">
+              <span class="metric-label">Program Break (brk)</span>
+              <span class="metric-val mono" id="heapBrkVal">0x00500000</span>
+            </div>
+            <div class="heap-metric-card">
+              <span class="metric-label">Heap Allocated</span>
+              <span class="metric-val text-cyan" id="heapAllocVal">0 B</span>
+            </div>
+            <div class="heap-metric-card">
+              <span class="metric-label">Free Holes</span>
+              <span class="metric-val text-muted" id="heapFreeVal">0 B</span>
+            </div>
+            <div class="heap-metric-card">
+              <span class="metric-label">Resident Pages</span>
+              <span class="metric-val text-emerald" id="heapPagesVal">0 (0 KB)</span>
+            </div>
+          </div>
+
+          <div class="heap-map-section">
+            <div class="heap-map-header">
+              <span class="heap-map-title">VISUAL HEAP MAP (0x00500000 → BRK)</span>
+              <span class="heap-legend">
+                <span class="legend-item"><span class="legend-swatch swatch-alloc"></span> Allocated</span>
+                <span class="legend-item"><span class="legend-swatch swatch-free"></span> Free Hole</span>
+              </span>
+            </div>
+            <div class="heap-visual-strip" id="heapVisualStrip">
+              <!-- Dynamically populated blocks -->
+            </div>
+          </div>
+
+          <div class="heap-table-wrapper">
+            <table class="regs-table heap-table">
+              <thead>
+                <tr>
+                  <th style="width: 82px;">Chunk Addr</th>
+                  <th style="width: 76px;">Status</th>
+                  <th style="width: 85px;">Total Size</th>
+                  <th style="width: 85px;">Payload</th>
+                  <th>Payload Pointer</th>
+                </tr>
+              </thead>
+              <tbody id="heapTableBody">
+                <!-- Dynamically populated chunk rows -->
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
 
       <!-- Tab 3: Level 1 MMIO Virtual Screen / Framebuffer (320x240) -->

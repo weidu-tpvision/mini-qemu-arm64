@@ -191,4 +191,34 @@ export class Memory {
   clearVramDirty() {
     this.vramDirty = false;
   }
+
+  // Deallocate a specific 4 KB page
+  freePage(pageIndex) {
+    return this.pages.delete(pageIndex);
+  }
+
+  // Deallocate a range of virtual addresses (used by sys_munmap and sys_brk shrink)
+  freeRange(startAddr, length) {
+    const start = Number(startAddr);
+    const end = start + Number(length);
+    const firstPage = Math.floor(start / PAGE_SIZE);
+    const lastPage = Math.floor((end - 1) / PAGE_SIZE);
+    let freedCount = 0;
+    for (let p = firstPage; p <= lastPage; p++) {
+      if (this.pages.delete(p)) {
+        freedCount++;
+      }
+    }
+    return freedCount;
+  }
+
+  // Total allocated 4 KB pages currently in resident memory
+  getPageCount() {
+    return this.pages.size;
+  }
+
+  // Total resident byte size of all mapped 4 KB pages
+  getMappedBytes() {
+    return this.pages.size * PAGE_SIZE;
+  }
 }

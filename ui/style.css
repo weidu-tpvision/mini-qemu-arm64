@@ -1145,3 +1145,176 @@ select:hover, select:focus {
   border-radius: 12px;
   border: 1px solid var(--border-color);
 }
+
+/* --- Dynamic Heap Allocator Inspector --- */
+.heap-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+}
+
+.heap-metrics-bar {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.heap-metric-card {
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.heap-metric-card .metric-label {
+  font-size: 9px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+}
+
+.heap-metric-card .metric-val {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.heap-map-section {
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 10px;
+}
+
+.heap-map-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.heap-map-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  letter-spacing: 0.5px;
+}
+
+.heap-legend {
+  display: flex;
+  gap: 12px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.swatch-alloc {
+  background-color: #38bdf8;
+}
+
+.swatch-free {
+  background-color: #475569;
+}
+
+.heap-visual-strip {
+  height: 42px;
+  background-color: #080c14;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 3px;
+  gap: 3px;
+}
+
+.heap-chunk-box {
+  height: 100%;
+  border-radius: 3px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 0 8px;
+  cursor: pointer;
+  font-size: 9.5px;
+  font-family: var(--font-mono);
+  transition: all 0.15s;
+  user-select: none;
+  min-width: 48px;
+  white-space: nowrap;
+}
+
+.heap-chunk-alloc {
+  background-color: rgba(56, 189, 248, 0.18);
+  border: 1px solid rgba(56, 189, 248, 0.6);
+  color: var(--accent-cyan);
+}
+
+.heap-chunk-alloc:hover {
+  background-color: rgba(56, 189, 248, 0.35);
+  border-color: #38bdf8;
+}
+
+.heap-chunk-free {
+  background-color: rgba(51, 65, 85, 0.35);
+  border: 1px dashed #64748b;
+  color: var(--text-muted);
+}
+
+.heap-chunk-free:hover {
+  background-color: rgba(51, 65, 85, 0.65);
+  border-color: var(--text-secondary);
+}
+
+.heap-table-wrapper {
+  overflow-y: auto;
+  max-height: 280px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background-color: var(--bg-card);
+}
+
+.heap-table th {
+  position: sticky;
+  top: 0;
+  background-color: var(--bg-input);
+  z-index: 1;
+}
+
+.heap-badge {
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  display: inline-block;
+}
+
+.badge-alloc {
+  background-color: rgba(56, 189, 248, 0.15);
+  color: var(--accent-cyan);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+}
+
+.badge-free {
+  background-color: rgba(148, 163, 184, 0.1);
+  color: var(--text-muted);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
