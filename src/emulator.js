@@ -1213,6 +1213,488 @@ export class MiniQEMU {
         break;
       }
 
+      // --- Floating-Point Scalar Arithmetic ---
+      case InstructionType.FADD:
+      case InstructionType.FSUB:
+      case InstructionType.FMUL:
+      case InstructionType.FDIV:
+      case InstructionType.FNMUL:
+      case InstructionType.FMAX:
+      case InstructionType.FMIN: {
+        const isD = decoded.isDouble;
+        const v1 = isD ? this.cpu.getFRegDouble(decoded.rn) : this.cpu.getFRegSingle(decoded.rn);
+        const v2 = isD ? this.cpu.getFRegDouble(decoded.rm) : this.cpu.getFRegSingle(decoded.rm);
+        let res = 0;
+        switch (decoded.type) {
+          case InstructionType.FADD: res = v1 + v2; break;
+          case InstructionType.FSUB: res = v1 - v2; break;
+          case InstructionType.FMUL: res = v1 * v2; break;
+          case InstructionType.FDIV: res = v1 / v2; break;
+          case InstructionType.FNMUL: res = -(v1 * v2); break;
+          case InstructionType.FMAX: res = Math.max(v1, v2); break;
+          case InstructionType.FMIN: res = Math.min(v1, v2); break;
+        }
+        if (isD) this.cpu.setFRegDouble(decoded.rd, res);
+        else this.cpu.setFRegSingle(decoded.rd, res);
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.FNEG:
+      case InstructionType.FABS:
+      case InstructionType.FSQRT: {
+        const isD = decoded.isDouble;
+        const v = isD ? this.cpu.getFRegDouble(decoded.rn) : this.cpu.getFRegSingle(decoded.rn);
+        let res = 0;
+        if (decoded.type === InstructionType.FNEG) res = -v;
+        else if (decoded.type === InstructionType.FABS) res = Math.abs(v);
+        else if (decoded.type === InstructionType.FSQRT) res = Math.sqrt(v);
+        if (isD) this.cpu.setFRegDouble(decoded.rd, res);
+        else this.cpu.setFRegSingle(decoded.rd, res);
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.FCMP: {
+        const isD = decoded.isDouble;
+        const v1 = isD ? this.cpu.getFRegDouble(decoded.rn) : this.cpu.getFRegSingle(decoded.rn);
+        const v2 = decoded.isZero ? 0.0 : (isD ? this.cpu.getFRegDouble(decoded.rm) : this.cpu.getFRegSingle(decoded.rm));
+
+        if (Number.isNaN(v1) || Number.isNaN(v2)) {
+          this.cpu.flags.N = false;
+          this.cpu.flags.Z = false;
+          this.cpu.flags.C = false;
+          this.cpu.flags.V = true; // Unordered
+        } else if (v1 === v2) {
+          this.cpu.flags.N = false;
+          this.cpu.flags.Z = true;
+          this.cpu.flags.C = true;
+          this.cpu.flags.V = false;
+        } else if (v1 < v2) {
+          this.cpu.flags.N = true;
+          this.cpu.flags.Z = false;
+          this.cpu.flags.C = false;
+          this.cpu.flags.V = false;
+        } else {
+          this.cpu.flags.N = false;
+          this.cpu.flags.Z = false;
+          this.cpu.flags.C = true;
+          this.cpu.flags.V = false;
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.FCVT: {
+        // Precision conversion
+        if (decoded.dstDouble) {
+          // Single to double
+          const s = this.cpu.getFRegSingle(decoded.rn);
+          this.cpu.setFRegDouble(decoded.rd, s);
+        } else {
+          // Double to single
+          const d = this.cpu.getFRegDouble(decoded.rn);
+          this.cpu.setFRegSingle(decoded.rd, d);
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.SCVTF: {
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const rawInt = this.cpu.getReg(decoded.rn);
+        const sInt = Number(BigInt.asIntN(bits, rawInt));
+        if (decoded.isDouble) this.cpu.setFRegDouble(decoded.rd, sInt);
+        else this.cpu.setFRegSingle(decoded.rd, sInt);
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.UCVTF: {
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const rawInt = this.cpu.getReg(decoded.rn);
+        const uInt = Number(BigInt.asUintN(bits, rawInt));
+        if (decoded.isDouble) this.cpu.setFRegDouble(decoded.rd, uInt);
+        else this.cpu.setFRegSingle(decoded.rd, uInt);
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.FCVTZS: {
+        const isD = decoded.isDouble;
+        const v = isD ? this.cpu.getFRegDouble(decoded.rn) : this.cpu.getFRegSingle(decoded.rn);
+        const truncated = Math.trunc(v);
+        const bits = decoded.sf === 0 ? 32 : 64;
+        this.cpu.setReg(decoded.rd, BigInt.asUintN(bits, BigInt(truncated)));
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.FCVTZU: {
+        const isD = decoded.isDouble;
+        const v = isD ? this.cpu.getFRegDouble(decoded.rn) : this.cpu.getFRegSingle(decoded.rn);
+        const truncated = Math.max(0, Math.trunc(v));
+        const bits = decoded.sf === 0 ? 32 : 64;
+        this.cpu.setReg(decoded.rd, BigInt.asUintN(bits, BigInt(truncated)));
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.FMOV: {
+        if (decoded.isImm) {
+          if (decoded.isDouble) this.cpu.setFRegDouble(decoded.rd, decoded.immValue);
+          else this.cpu.setFRegSingle(decoded.rd, decoded.immValue);
+        } else if (decoded.isFprToGpr) {
+          if (decoded.sf === 1) {
+            this.cpu.setReg(decoded.rd, this.cpu.getFRegBits64(decoded.rn));
+          } else {
+            this.cpu.setReg(decoded.rd, BigInt(this.cpu.getFRegBits32(decoded.rn)));
+          }
+        } else if (decoded.isGprToFpr) {
+          if (decoded.sf === 1) {
+            this.cpu.setFRegBits64(decoded.rd, this.cpu.getReg(decoded.rn));
+          } else {
+            this.cpu.setFRegBits32(decoded.rd, Number(this.cpu.getReg(decoded.rn) & 0xffffffffn));
+          }
+        } else {
+          // Register to register
+          if (decoded.isDouble) this.cpu.setFRegDouble(decoded.rd, this.cpu.getFRegDouble(decoded.rn));
+          else this.cpu.setFRegSingle(decoded.rd, this.cpu.getFRegSingle(decoded.rn));
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      // --- Floating-Point & Vector Loads / Stores ---
+      case InstructionType.LDR_FREG: {
+        const { baseAddr, targetAddr } = this.computeLoadStoreAddr(decoded);
+        if (decoded.isDouble) {
+          this.cpu.setFRegBits64(decoded.rt, this.memory.read64(targetAddr));
+        } else {
+          this.cpu.setFRegBits32(decoded.rt, this.memory.read32(targetAddr));
+        }
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.STR_FREG: {
+        const { baseAddr, targetAddr } = this.computeLoadStoreAddr(decoded);
+        if (decoded.isDouble) {
+          this.memory.write64(targetAddr, this.cpu.getFRegBits64(decoded.rt));
+        } else {
+          this.memory.write32(targetAddr, this.cpu.getFRegBits32(decoded.rt));
+        }
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.LDR_VREG: {
+        const { baseAddr, targetAddr } = this.computeLoadStoreAddr(decoded);
+        const qBytes = new Uint8Array(16);
+        for (let i = 0; i < 16; i++) qBytes[i] = this.memory.read8(targetAddr + i);
+        this.cpu.setVRegBytes(decoded.rt, qBytes);
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.STR_VREG: {
+        const { baseAddr, targetAddr } = this.computeLoadStoreAddr(decoded);
+        const bytes = this.cpu.getVRegBytes(decoded.rt);
+        for (let i = 0; i < 16; i++) this.memory.write8(targetAddr + i, bytes[i]);
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.LDP_FREG: {
+        const baseAddr = Number(this.cpu.getSPOrReg(decoded.rn));
+        const targetAddr = decoded.postIndex ? baseAddr : (baseAddr + decoded.offsetBytes);
+        const scale = decoded.isDouble ? 8 : 4;
+        if (decoded.isDouble) {
+          this.cpu.setFRegBits64(decoded.rt1, this.memory.read64(targetAddr));
+          this.cpu.setFRegBits64(decoded.rt2, this.memory.read64(targetAddr + scale));
+        } else {
+          this.cpu.setFRegBits32(decoded.rt1, this.memory.read32(targetAddr));
+          this.cpu.setFRegBits32(decoded.rt2, this.memory.read32(targetAddr + scale));
+        }
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.STP_FREG: {
+        const baseAddr = Number(this.cpu.getSPOrReg(decoded.rn));
+        const targetAddr = decoded.postIndex ? baseAddr : (baseAddr + decoded.offsetBytes);
+        const scale = decoded.isDouble ? 8 : 4;
+        if (decoded.isDouble) {
+          this.memory.write64(targetAddr, this.cpu.getFRegBits64(decoded.rt1));
+          this.memory.write64(targetAddr + scale, this.cpu.getFRegBits64(decoded.rt2));
+        } else {
+          this.memory.write32(targetAddr, this.cpu.getFRegBits32(decoded.rt1));
+          this.memory.write32(targetAddr + scale, this.cpu.getFRegBits32(decoded.rt2));
+        }
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.LDP_VREG: {
+        const baseAddr = Number(this.cpu.getSPOrReg(decoded.rn));
+        const targetAddr = decoded.postIndex ? baseAddr : (baseAddr + decoded.offsetBytes);
+        const q1 = new Uint8Array(16);
+        const q2 = new Uint8Array(16);
+        for (let i = 0; i < 16; i++) {
+          q1[i] = this.memory.read8(targetAddr + i);
+          q2[i] = this.memory.read8(targetAddr + 16 + i);
+        }
+        this.cpu.setVRegBytes(decoded.rt1, q1);
+        this.cpu.setVRegBytes(decoded.rt2, q2);
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.STP_VREG: {
+        const baseAddr = Number(this.cpu.getSPOrReg(decoded.rn));
+        const targetAddr = decoded.postIndex ? baseAddr : (baseAddr + decoded.offsetBytes);
+        const q1 = this.cpu.getVRegBytes(decoded.rt1);
+        const q2 = this.cpu.getVRegBytes(decoded.rt2);
+        for (let i = 0; i < 16; i++) {
+          this.memory.write8(targetAddr + i, q1[i]);
+          this.memory.write8(targetAddr + 16 + i, q2[i]);
+        }
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      // --- NEON / Advanced SIMD Operations ---
+      case InstructionType.FADD_VEC:
+      case InstructionType.FSUB_VEC:
+      case InstructionType.FMUL_VEC:
+      case InstructionType.FDIV_VEC:
+      case InstructionType.FMAX_VEC:
+      case InstructionType.FMIN_VEC: {
+        const lanes = decoded.lanes;
+        if (decoded.isDouble) {
+          const v1 = this.cpu.getVRegFloat64(decoded.rn, lanes);
+          const v2 = this.cpu.getVRegFloat64(decoded.rm, lanes);
+          const out = new Float64Array(lanes);
+          for (let i = 0; i < lanes; i++) {
+            switch (decoded.type) {
+              case InstructionType.FADD_VEC: out[i] = v1[i] + v2[i]; break;
+              case InstructionType.FSUB_VEC: out[i] = v1[i] - v2[i]; break;
+              case InstructionType.FMUL_VEC: out[i] = v1[i] * v2[i]; break;
+              case InstructionType.FDIV_VEC: out[i] = v1[i] / v2[i]; break;
+              case InstructionType.FMAX_VEC: out[i] = Math.max(v1[i], v2[i]); break;
+              case InstructionType.FMIN_VEC: out[i] = Math.min(v1[i], v2[i]); break;
+            }
+          }
+          this.cpu.setVRegFloat64(decoded.rd, out, lanes);
+        } else {
+          const v1 = this.cpu.getVRegFloat32(decoded.rn, lanes);
+          const v2 = this.cpu.getVRegFloat32(decoded.rm, lanes);
+          const out = new Float32Array(lanes);
+          for (let i = 0; i < lanes; i++) {
+            switch (decoded.type) {
+              case InstructionType.FADD_VEC: out[i] = v1[i] + v2[i]; break;
+              case InstructionType.FSUB_VEC: out[i] = v1[i] - v2[i]; break;
+              case InstructionType.FMUL_VEC: out[i] = v1[i] * v2[i]; break;
+              case InstructionType.FDIV_VEC: out[i] = v1[i] / v2[i]; break;
+              case InstructionType.FMAX_VEC: out[i] = Math.max(v1[i], v2[i]); break;
+              case InstructionType.FMIN_VEC: out[i] = Math.min(v1[i], v2[i]); break;
+            }
+          }
+          this.cpu.setVRegFloat32(decoded.rd, out, lanes);
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.FADDP_VEC: {
+        const lanes = decoded.lanes;
+        if (decoded.isDouble) {
+          const v1 = this.cpu.getVRegFloat64(decoded.rn, lanes);
+          const v2 = this.cpu.getVRegFloat64(decoded.rm, lanes);
+          const out = new Float64Array(lanes);
+          if (lanes === 2) {
+            out[0] = v1[0] + v1[1];
+            out[1] = v2[0] + v2[1];
+          } else {
+            out[0] = v1[0] + v2[0];
+          }
+          this.cpu.setVRegFloat64(decoded.rd, out, lanes);
+        } else {
+          const v1 = this.cpu.getVRegFloat32(decoded.rn, lanes);
+          const v2 = this.cpu.getVRegFloat32(decoded.rm, lanes);
+          const out = new Float32Array(lanes);
+          if (lanes === 4) {
+            out[0] = v1[0] + v1[1];
+            out[1] = v1[2] + v1[3];
+            out[2] = v2[0] + v2[1];
+            out[3] = v2[2] + v2[3];
+          } else {
+            out[0] = v1[0] + v1[1];
+            out[1] = v2[0] + v2[1];
+          }
+          this.cpu.setVRegFloat32(decoded.rd, out, lanes);
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.FNEG_VEC:
+      case InstructionType.FABS_VEC: {
+        const lanes = decoded.lanes;
+        if (decoded.isDouble) {
+          const v = this.cpu.getVRegFloat64(decoded.rn, lanes);
+          const out = new Float64Array(lanes);
+          for (let i = 0; i < lanes; i++) {
+            out[i] = (decoded.type === InstructionType.FNEG_VEC) ? -v[i] : Math.abs(v[i]);
+          }
+          this.cpu.setVRegFloat64(decoded.rd, out, lanes);
+        } else {
+          const v = this.cpu.getVRegFloat32(decoded.rn, lanes);
+          const out = new Float32Array(lanes);
+          for (let i = 0; i < lanes; i++) {
+            out[i] = (decoded.type === InstructionType.FNEG_VEC) ? -v[i] : Math.abs(v[i]);
+          }
+          this.cpu.setVRegFloat32(decoded.rd, out, lanes);
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.ADD_VEC:
+      case InstructionType.SUB_VEC:
+      case InstructionType.MUL_VEC: {
+        const lanes = decoded.lanes;
+        if (decoded.size === 2) { // 32-bit int
+          const v1 = this.cpu.getVRegInt32(decoded.rn, lanes);
+          const v2 = this.cpu.getVRegInt32(decoded.rm, lanes);
+          const out = new Int32Array(lanes);
+          for (let i = 0; i < lanes; i++) {
+            if (decoded.type === InstructionType.ADD_VEC) out[i] = v1[i] + v2[i];
+            else if (decoded.type === InstructionType.SUB_VEC) out[i] = v1[i] - v2[i];
+            else out[i] = Math.imul(v1[i], v2[i]);
+          }
+          this.cpu.setVRegInt32(decoded.rd, out, lanes);
+        } else {
+          // Byte-level default
+          const b1 = this.cpu.getVRegBytes(decoded.rn);
+          const b2 = this.cpu.getVRegBytes(decoded.rm);
+          const out = new Uint8Array(16);
+          const maxL = decoded.Q ? 16 : 8;
+          for (let i = 0; i < maxL; i++) {
+            if (decoded.type === InstructionType.ADD_VEC) out[i] = (b1[i] + b2[i]) & 0xff;
+            else if (decoded.type === InstructionType.SUB_VEC) out[i] = (b1[i] - b2[i]) & 0xff;
+            else out[i] = (b1[i] * b2[i]) & 0xff;
+          }
+          this.cpu.setVRegBytes(decoded.rd, out);
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.ADDP_VEC: {
+        const lanes = decoded.lanes;
+        if (decoded.size === 2) {
+          const v1 = this.cpu.getVRegInt32(decoded.rn, lanes);
+          const v2 = this.cpu.getVRegInt32(decoded.rm, lanes);
+          const out = new Int32Array(lanes);
+          if (lanes === 4) {
+            out[0] = v1[0] + v1[1];
+            out[1] = v1[2] + v1[3];
+            out[2] = v2[0] + v2[1];
+            out[3] = v2[2] + v2[3];
+          } else {
+            out[0] = v1[0] + v1[1];
+            out[1] = v2[0] + v2[1];
+          }
+          this.cpu.setVRegInt32(decoded.rd, out, lanes);
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.AND_VEC:
+      case InstructionType.ORR_VEC:
+      case InstructionType.EOR_VEC:
+      case InstructionType.NOT_VEC: {
+        const b1 = this.cpu.getVRegBytes(decoded.rn);
+        const b2 = decoded.rm !== undefined ? this.cpu.getVRegBytes(decoded.rm) : null;
+        const out = new Uint8Array(16);
+        for (let i = 0; i < 16; i++) {
+          if (decoded.type === InstructionType.AND_VEC) out[i] = b1[i] & b2[i];
+          else if (decoded.type === InstructionType.ORR_VEC) out[i] = b1[i] | b2[i];
+          else if (decoded.type === InstructionType.EOR_VEC) out[i] = b1[i] ^ b2[i];
+          else if (decoded.type === InstructionType.NOT_VEC) out[i] = ~b1[i] & 0xff;
+        }
+        this.cpu.setVRegBytes(decoded.rd, out);
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.DUP_ELEM: {
+        const val = this.cpu.getVRegLane(decoded.rn, decoded.elemSize, decoded.lane);
+        const maxLanes = decoded.Q ? (16 >> decoded.elemSize) : (8 >> decoded.elemSize);
+        for (let l = 0; l < maxLanes; l++) {
+          this.cpu.setVRegLane(decoded.rd, decoded.elemSize, l, val);
+        }
+        if (!decoded.Q) {
+          // Zero upper 64 bits
+          this.cpu.vUint64[decoded.rd * 2 + 1] = 0n;
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.DUP_GEN: {
+        const gprVal = this.cpu.getReg(decoded.rn);
+        const maxLanes = decoded.Q ? (16 >> decoded.elemSize) : (8 >> decoded.elemSize);
+        for (let l = 0; l < maxLanes; l++) {
+          this.cpu.setVRegLane(decoded.rd, decoded.elemSize, l, gprVal);
+        }
+        if (!decoded.Q) {
+          this.cpu.vUint64[decoded.rd * 2 + 1] = 0n;
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.INS_GEN: {
+        const gprVal = this.cpu.getReg(decoded.rn);
+        this.cpu.setVRegLane(decoded.rd, decoded.elemSize, decoded.lane, gprVal);
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.UMOV_ELEM: {
+        const laneVal = this.cpu.getVRegLane(decoded.rn, decoded.elemSize, decoded.lane);
+        this.cpu.setReg(decoded.rd, BigInt(laneVal));
+        this.cpu.pc += 4n;
+        break;
+      }
+
       default:
         throw new Error(`Unrecognized instruction 0x${rawInstr.toString(16)} at PC ${hexPC}`);
     }

@@ -76,6 +76,12 @@ const BINARY_DESCRIPTIONS = {
     title: "Dynamic Memory Allocator (malloc/free)",
     desc: "Boundary-tag memory allocator: malloc, free, hole reuse without brk advance, and adjacent free block coalescing over sys_brk (214).",
     category: "Memory Management & Allocators"
+  },
+  "neon_matrix.elf": {
+    name: "neon_matrix.elf",
+    title: "NEON SIMD & Floating-Point Vector Math",
+    desc: "Scalar FP (SCVTF, FADD, FMUL, FDIV, FSQRT, FCMP, FCVTZS) & 128-bit NEON vector math (FMUL.4S, FADDP.4S dot product reduction).",
+    category: "Floating-Point & NEON SIMD"
   }
 };
 

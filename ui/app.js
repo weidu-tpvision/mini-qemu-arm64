@@ -43,6 +43,12 @@ const pipeTypeBadge = document.getElementById("pipeTypeBadge");
 const pipeDisasmText = document.getElementById("pipeDisasmText");
 const pipeSemText = document.getElementById("pipeSemText");
 
+const tabGprRegs = document.getElementById("tabGprRegs");
+const tabNeonRegs = document.getElementById("tabNeonRegs");
+const gprTableContainer = document.getElementById("gprTableContainer");
+const neonTableContainer = document.getElementById("neonTableContainer");
+const neonTableBody = document.getElementById("neonTableBody");
+
 const regsTableBody = document.getElementById("regsTableBody");
 const disasmTableBody = document.getElementById("disasmTableBody");
 const x86CodeBlock = document.getElementById("x86CodeBlock");
@@ -173,6 +179,36 @@ function initRegistersTable() {
     `;
     regsTableBody.appendChild(tr);
   }
+
+  if (neonTableBody) {
+    neonTableBody.innerHTML = "";
+    for (let i = 0; i < 32; i++) {
+      const tr = document.createElement("tr");
+      tr.id = `neon-row-${i}`;
+      tr.className = "reg-row";
+      tr.innerHTML = `
+        <td class="reg-name mono" style="color: var(--accent-cyan); font-weight: 700;">V${i}<span class="reg-abi">D${i}/S${i}</span></td>
+        <td class="reg-hex mono" id="neon-d-${i}" style="font-size: 11px;">0.000000</td>
+        <td class="reg-dec mono" id="neon-q-${i}" style="font-size: 11px; color: var(--accent-amber);">[0, 0, 0, 0]</td>
+      `;
+      neonTableBody.appendChild(tr);
+    }
+  }
+
+  if (tabGprRegs && tabNeonRegs) {
+    tabGprRegs.onclick = () => {
+      tabGprRegs.classList.add("active");
+      tabNeonRegs.classList.remove("active");
+      if (gprTableContainer) gprTableContainer.style.display = "block";
+      if (neonTableContainer) neonTableContainer.style.display = "none";
+    };
+    tabNeonRegs.onclick = () => {
+      tabNeonRegs.classList.add("active");
+      tabGprRegs.classList.remove("active");
+      if (gprTableContainer) gprTableContainer.style.display = "none";
+      if (neonTableContainer) neonTableContainer.style.display = "block";
+    };
+  }
 }
 
 // 2. Update CPU State (Registers, Flags, PC/SP, and Live Pipeline Bar)
@@ -213,6 +249,24 @@ function updateCPUState(changed = []) {
     const decElem = document.getElementById(`reg-dec-${i}`);
     if (hexElem) hexElem.textContent = `0x${val.toString(16).padStart(16, "0")}`;
     if (decElem) decElem.textContent = BigInt.asIntN(64, val).toString();
+  }
+
+  // Update Floating-Point & NEON Registers
+  if (neonTableBody) {
+    for (let i = 0; i < 32; i++) {
+      const dVal = emulator.cpu.getFRegDouble(i);
+      const sVal = emulator.cpu.getFRegSingle(i);
+      const v4 = emulator.cpu.getVRegFloat32(i, 4);
+      const dElem = document.getElementById(`neon-d-${i}`);
+      const qElem = document.getElementById(`neon-q-${i}`);
+      if (dElem) {
+        dElem.textContent = `D=${Number.isFinite(dVal) ? dVal.toFixed(4) : dVal} (S=${Number.isFinite(sVal) ? sVal.toFixed(3) : sVal})`;
+      }
+      if (qElem) {
+        const fStr = `[${Array.from(v4).map(f => Number.isFinite(f) ? (f % 1 === 0 ? f.toFixed(0) : f.toFixed(2)) : f).join(", ")}]`;
+        qElem.textContent = fStr;
+      }
+    }
   }
 
   // Apply diff highlights
@@ -509,6 +563,32 @@ function getInstructionAnnotation(decoded, addr = 0) {
       return `${decoded.sysregName.toUpperCase()} ← ${regLabel(decoded.rt)} (Write Thread/System Register)`;
     case InstructionType.SVC:
       return `Linux ARM64 Syscall Trap (svc #${decoded.imm16 ?? 0}, X8 = syscall#)`;
+    case InstructionType.FADD:
+    case InstructionType.FSUB:
+    case InstructionType.FMUL:
+    case InstructionType.FDIV:
+      return `${decoded.isDouble ? "Double" : "Single"} Float: ${decoded.disassembly}`;
+    case InstructionType.FCMP:
+      return `Compare Floats (${decoded.disassembly}) → Update NZCV Flags`;
+    case InstructionType.SCVTF:
+    case InstructionType.UCVTF:
+      return `Convert Integer to ${decoded.isDouble ? "Double" : "Single"} Float`;
+    case InstructionType.FCVTZS:
+    case InstructionType.FCVTZU:
+      return `Convert Float to Integer (Truncate)`;
+    case InstructionType.FADD_VEC:
+    case InstructionType.FSUB_VEC:
+    case InstructionType.FMUL_VEC:
+    case InstructionType.FDIV_VEC:
+      return `NEON SIMD Vector Float Math (${decoded.disassembly})`;
+    case InstructionType.FADDP_VEC:
+      return `NEON SIMD Pairwise Vector Float Add / Dot-Product Reduction`;
+    case InstructionType.LDR_FREG:
+    case InstructionType.STR_FREG:
+      return `${decoded.type === InstructionType.LDR_FREG ? "Load" : "Store"} Float Register (${decoded.disassembly})`;
+    case InstructionType.LDR_VREG:
+    case InstructionType.STR_VREG:
+      return `${decoded.type === InstructionType.LDR_VREG ? "Load" : "Store"} 128-bit NEON Vector Register (${decoded.disassembly})`;
     default:
       return "";
   }
@@ -652,6 +732,11 @@ function isInteractiveBinary(filename = "") {
 function isHeapBinary(filename = "") {
   const f = filename.toLowerCase();
   return f.includes("heap") || f.includes("dynamic") || f.includes("malloc") || f.includes("alloc");
+}
+
+function isNeonBinary(filename = "") {
+  const f = filename.toLowerCase();
+  return f.includes("neon") || f.includes("float") || f.includes("simd") || f.includes("matrix");
 }
 
 function runUntilFrameOrHalt(emuInstance, maxCycles = 2000000) {
@@ -995,6 +1080,9 @@ function loadBinaryBuffer(buffer, filename, desc = "") {
     if (runBenchBtn) runBenchBtn.textContent = "⚡ Benchmark 3 Frames";
   } else if (isHeapBinary(filename)) {
     switchMemoryTab("heapView");
+    if (runBenchBtn) runBenchBtn.textContent = "⚡ Benchmark 5,000 Runs";
+  } else if (isNeonBinary(filename)) {
+    if (tabNeonRegs) tabNeonRegs.click();
     if (runBenchBtn) runBenchBtn.textContent = "⚡ Benchmark 5,000 Runs";
   } else {
     if (runBenchBtn) runBenchBtn.textContent = "⚡ Benchmark 5,000 Runs";

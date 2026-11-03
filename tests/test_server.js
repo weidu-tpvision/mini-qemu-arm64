@@ -55,7 +55,10 @@ try {
   const dynMemBin = binaries.find(b => b.filename === "dynamic_memory.elf");
   assert.ok(dynMemBin, "dynamic_memory.elf must be in the list");
   assert.strictEqual(dynMemBin.category, "Memory Management & Allocators");
-  console.log(`[PASS] /api/binaries returned ${binaries.length} binaries including graphics & memory catalogs`);
+  const neonBin = binaries.find(b => b.filename === "neon_matrix.elf");
+  assert.ok(neonBin, "neon_matrix.elf must be in the list");
+  assert.strictEqual(neonBin.category, "Floating-Point & NEON SIMD");
+  console.log(`[PASS] /api/binaries returned ${binaries.length} binaries including graphics, memory & NEON catalogs`);
 
   // 2. Test /bin/fib.elf raw binary download
   const binRes = await fetchUrl("/bin/fib.elf");

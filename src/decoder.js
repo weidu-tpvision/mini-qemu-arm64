@@ -73,6 +73,61 @@ export const InstructionType = {
   MRS: "MRS",           // Move System Register to general-purpose register (e.g. TPIDR_EL0)
   MSR: "MSR",           // Move general-purpose register to System Register (e.g. TPIDR_EL0)
 
+  // --- Floating-Point (Scalar VFP) ---
+  FADD: "FADD",         // Floating-point Add (Single/Double)
+  FSUB: "FSUB",         // Floating-point Subtract
+  FMUL: "FMUL",         // Floating-point Multiply
+  FDIV: "FDIV",         // Floating-point Divide
+  FNMUL: "FNMUL",       // Floating-point Negated Multiply
+  FNEG: "FNEG",         // Floating-point Negate
+  FABS: "FABS",         // Floating-point Absolute value
+  FSQRT: "FSQRT",       // Floating-point Square Root
+  FMAX: "FMAX",         // Floating-point Maximum
+  FMIN: "FMIN",         // Floating-point Minimum
+  FCMP: "FCMP",         // Floating-point Compare
+  FCVT: "FCVT",         // Floating-point Precision Conversion (Single <-> Double)
+  SCVTF: "SCVTF",       // Signed integer to Floating-point conversion
+  UCVTF: "UCVTF",       // Unsigned integer to Floating-point conversion
+  FCVTZS: "FCVTZS",     // Floating-point to Signed integer (truncate)
+  FCVTZU: "FCVTZU",     // Floating-point to Unsigned integer (truncate)
+  FMOV: "FMOV",         // Floating-point Move (reg, imm, or GPR <-> FPR bit-cast)
+
+  // Floating-Point & Vector Loads and Stores
+  LDR_FREG: "LDR_FREG", // Load FP single/double register (LDR Sn/Dn, [Xn])
+  STR_FREG: "STR_FREG", // Store FP single/double register (STR Sn/Dn, [Xn])
+  LDR_VREG: "LDR_VREG", // Load 128-bit vector register (LDR Qn, [Xn])
+  STR_VREG: "STR_VREG", // Store 128-bit vector register (STR Qn, [Xn])
+  LDP_FREG: "LDP_FREG", // Load Pair FP registers (LDP Dn, Dm, [Xn])
+  STP_FREG: "STP_FREG", // Store Pair FP registers (STP Dn, Dm, [Xn])
+  LDP_VREG: "LDP_VREG", // Load Pair 128-bit vector registers (LDP Qn, Qm, [Xn])
+  STP_VREG: "STP_VREG", // Store Pair 128-bit vector registers (STP Qn, Qm, [Xn])
+
+  // --- NEON / Advanced SIMD Instructions ---
+  FADD_VEC: "FADD_VEC",   // Vector Floating-point Add
+  FSUB_VEC: "FSUB_VEC",   // Vector Floating-point Subtract
+  FMUL_VEC: "FMUL_VEC",   // Vector Floating-point Multiply
+  FDIV_VEC: "FDIV_VEC",   // Vector Floating-point Divide
+  FADDP_VEC: "FADDP_VEC", // Vector Floating-point Pairwise Add (Reduction)
+  FMAX_VEC: "FMAX_VEC",   // Vector Floating-point Maximum
+  FMIN_VEC: "FMIN_VEC",   // Vector Floating-point Minimum
+  FNEG_VEC: "FNEG_VEC",   // Vector Floating-point Negate
+  FABS_VEC: "FABS_VEC",   // Vector Floating-point Absolute value
+
+  ADD_VEC: "ADD_VEC",     // Vector Integer Add
+  SUB_VEC: "SUB_VEC",     // Vector Integer Subtract
+  MUL_VEC: "MUL_VEC",     // Vector Integer Multiply
+  ADDP_VEC: "ADDP_VEC",   // Vector Integer Pairwise Add
+  AND_VEC: "AND_VEC",     // Vector Bitwise AND
+  ORR_VEC: "ORR_VEC",     // Vector Bitwise OR
+  EOR_VEC: "EOR_VEC",     // Vector Bitwise XOR
+  NOT_VEC: "NOT_VEC",     // Vector Bitwise NOT (MVN)
+
+  DUP_ELEM: "DUP_ELEM",   // DUP element to vector (dup vn.4s, vm.s[i])
+  DUP_GEN: "DUP_GEN",     // DUP general register to vector (dup vn.4s, wn)
+  INS_ELEM: "INS_ELEM",   // Insert element into vector
+  INS_GEN: "INS_GEN",     // Insert general register into vector lane
+  UMOV_ELEM: "UMOV_ELEM", // Extract vector lane to general register
+
   UNKNOWN: "UNKNOWN",
 };
 
@@ -136,6 +191,11 @@ export class Decoder {
     // 4. Loads and Stores (op0 matches x1x0)
     if ((op0 & 0b0101) === 0b0100) {
       return this._decodeLoadsAndStores(raw);
+    }
+
+    // 5. Data Processing -- Scalar Floating-Point and Advanced SIMD (op0 matches x111)
+    if ((op0 & 0b0111) === 0b0111) {
+      return this._decodeFloatAndNeon(raw);
     }
 
     return {
@@ -705,6 +765,8 @@ export class Decoder {
 
   // --- 4. Loads and Stores ---
   static _decodeLoadsAndStores(raw) {
+    const isVec = ((raw >>> 26) & 1) === 1;
+
     // 4.1 Load / Store Pair (STP / LDP): bits [29:27] = 101
     // Addressing modes in bits [24:23]: 01 = Post-index, 10 = Signed offset, 11 = Pre-index
     if (((raw >>> 27) & 0b111) === 0b101) {
@@ -713,7 +775,8 @@ export class Decoder {
       const lBit = (raw >>> 22) & 1; // 0 = Store (STP), 1 = Load (LDP)
       let imm7 = (raw >>> 15) & 0x7f;
       if (imm7 & 0x40) imm7 -= 0x80; // sign extend 7 bits
-      const offsetBytes = imm7 * 8; // 64-bit scaled by 8
+      const scale = isVec ? (opc === 0b10 ? 16 : opc === 0b01 ? 8 : 4) : 8;
+      const offsetBytes = imm7 * scale;
       const rt2 = (raw >>> 10) & 0x1f;
       const rn = (raw >>> 5) & 0x1f;
       const rt1 = raw & 0x1f;
@@ -722,15 +785,40 @@ export class Decoder {
       const postIndex = (addrMode === 0b01);
       const baseName = (rn === 31) ? "sp" : `x${rn}`;
 
-      const type = (lBit === 1) ? InstructionType.LDP : InstructionType.STP;
-      const mnem = (lBit === 1) ? "ldp" : "stp";
-
       let addrStr = `[${baseName}${offsetBytes !== 0 ? `, #${offsetBytes}` : ""}]`;
       if (preIndex) {
         addrStr = `[${baseName}, #${offsetBytes}]!`;
       } else if (postIndex) {
         addrStr = `[${baseName}], #${offsetBytes}`;
       }
+
+      if (isVec) {
+        const prefix = (opc === 0b10) ? "q" : (opc === 0b01) ? "d" : "s";
+        const isQuad = (opc === 0b10);
+        const type = lBit === 1
+          ? (isQuad ? InstructionType.LDP_VREG : InstructionType.LDP_FREG)
+          : (isQuad ? InstructionType.STP_VREG : InstructionType.STP_FREG);
+        const mnem = lBit === 1 ? "ldp" : "stp";
+        return {
+          type,
+          raw,
+          opc,
+          rt1,
+          rt2,
+          rn,
+          offsetBytes,
+          preIndex,
+          postIndex,
+          isVector: true,
+          isDouble: opc === 0b01,
+          isSingle: opc === 0b00,
+          isQuad,
+          disassembly: `${mnem} ${prefix}${rt1}, ${prefix}${rt2}, ${addrStr}`,
+        };
+      }
+
+      const type = (lBit === 1) ? InstructionType.LDP : InstructionType.STP;
+      const mnem = (lBit === 1) ? "ldp" : "stp";
 
       return {
         type,
@@ -764,9 +852,11 @@ export class Decoder {
     let regShift = 0;
     let addrStr = "";
 
+    const scale = isVec && size === 0b00 && (opc & 2) === 2 ? 4 : size;
+
     if (isUnsignedImm) {
       const imm12 = (raw >>> 10) & 0xfff;
-      offsetBytes = imm12 << size;
+      offsetBytes = imm12 << scale;
       addrStr = `[${baseName}${offsetBytes !== 0 ? `, #${offsetBytes}` : ""}]`;
     } else if (((raw >>> 21) & 1) === 0) {
       let imm9 = (raw >>> 12) & 0x1ff;
@@ -791,7 +881,7 @@ export class Decoder {
       rm = (raw >>> 16) & 0x1f;
       option = (raw >>> 13) & 0b111; // 010=uxtw, 011=lsl, 110=sxtw, 111=sxtx
       const sBit = (raw >>> 12) & 1;
-      regShift = sBit ? size : 0;
+      regShift = sBit ? scale : 0;
       const rmIs32 = (option === 0b010 || option === 0b110);
       const rmName = `${rmIs32 ? "w" : "x"}${rm}`;
       let extStr = "";
@@ -805,6 +895,31 @@ export class Decoder {
     }
 
     const commonProps = { raw, rt, rn, offsetBytes, preIndex, postIndex, unscaled, isRegOffset, rm, option, regShift };
+
+    // Floating-Point and SIMD Single Load/Store
+    if (isVec) {
+      // 128-bit Vector (Q): size = 00, opc = 10 (STR) or 11 (LDR)
+      if (size === 0b00 && (opc & 2) === 2) {
+        const isLoad = (opc & 1) === 1;
+        const type = isLoad ? InstructionType.LDR_VREG : InstructionType.STR_VREG;
+        const mnem = unscaled ? (isLoad ? "ldur" : "stur") : (isLoad ? "ldr" : "str");
+        return { type, ...commonProps, isVector: true, isQuad: true, disassembly: `${mnem} q${rt}, ${addrStr}` };
+      }
+      // 64-bit Double (D): size = 11
+      if (size === 0b11) {
+        const isLoad = opc === 0b01;
+        const type = isLoad ? InstructionType.LDR_FREG : InstructionType.STR_FREG;
+        const mnem = unscaled ? (isLoad ? "ldur" : "stur") : (isLoad ? "ldr" : "str");
+        return { type, ...commonProps, isVector: true, isDouble: true, disassembly: `${mnem} d${rt}, ${addrStr}` };
+      }
+      // 32-bit Single (S): size = 10
+      if (size === 0b10) {
+        const isLoad = opc === 0b01;
+        const type = isLoad ? InstructionType.LDR_FREG : InstructionType.STR_FREG;
+        const mnem = unscaled ? (isLoad ? "ldur" : "stur") : (isLoad ? "ldr" : "str");
+        return { type, ...commonProps, isVector: true, isSingle: true, disassembly: `${mnem} s${rt}, ${addrStr}` };
+      }
+    }
 
     // 64-bit: size = 11
     if (size === 0b11) {
@@ -861,5 +976,220 @@ export class Decoder {
     }
 
     return { type: InstructionType.UNKNOWN, raw, disassembly: `unknown ldr/str 0x${raw.toString(16)}` };
+  }
+
+  // --- 5. Data Processing -- Scalar Floating-Point and Advanced SIMD ---
+  static _decodeFloatAndNeon(raw) {
+    const rd = raw & 0x1f;
+    const rn = (raw >>> 5) & 0x1f;
+    const rm = (raw >>> 16) & 0x1f;
+
+    // 5.1 Scalar Floating-Point: bit 28 is 1 ((raw & 0x5f000000) === 0x1e000000)
+    if ((raw & 0x5f000000) === 0x1e000000) {
+      const ftype = (raw >>> 22) & 0b11; // 0=single (s), 1=double (d)
+      const p = (ftype === 0) ? "s" : (ftype === 1) ? "d" : "h";
+      const isDouble = (ftype === 1);
+      const b15_10 = (raw >>> 10) & 0x3f;
+      const b11_10 = (raw >>> 10) & 0x3;
+
+      // (a) FP 2-source: bits [11:10] == 10
+      if (b11_10 === 0b10) {
+        const opcode = (raw >>> 12) & 0xf;
+        let type = InstructionType.UNKNOWN;
+        let mnem = "";
+
+        if (opcode === 0b0000) { type = InstructionType.FMUL; mnem = "fmul"; }
+        else if (opcode === 0b0001) { type = InstructionType.FDIV; mnem = "fdiv"; }
+        else if (opcode === 0b0010) { type = InstructionType.FADD; mnem = "fadd"; }
+        else if (opcode === 0b0011) { type = InstructionType.FSUB; mnem = "fsub"; }
+        else if (opcode === 0b0100) { type = InstructionType.FMAX; mnem = "fmax"; }
+        else if (opcode === 0b0101) { type = InstructionType.FMIN; mnem = "fmin"; }
+        else if (opcode === 0b1000) { type = InstructionType.FNMUL; mnem = "fnmul"; }
+
+        if (type !== InstructionType.UNKNOWN) {
+          return { type, raw, ftype, isDouble, rd, rn, rm, disassembly: `${mnem} ${p}${rd}, ${p}${rn}, ${p}${rm}` };
+        }
+      }
+
+      // (b) FP Compare: bits [15:10] == 001000 (0x08)
+      if (b15_10 === 0x08) {
+        const isZero = ((raw >>> 3) & 1) === 1;
+        const disassembly = isZero ? `fcmp ${p}${rn}, #0.0` : `fcmp ${p}${rn}, ${p}${rm}`;
+        return { type: InstructionType.FCMP, raw, ftype, isDouble, isZero, rn, rm, disassembly };
+      }
+
+      // (c) Conversions between Float and Integer & Bitwise FMOV GPR <-> FPR: bits [15:10] == 000000
+      if (b15_10 === 0x00) {
+        const sf = (raw >>> 31) & 1;
+        const opcode = (raw >>> 16) & 0x1f;
+        const gprPrefix = sf ? "x" : "w";
+
+        if (opcode === 0b00000 || opcode === 0b11000) { // FCVTZS
+          return { type: InstructionType.FCVTZS, raw, sf, ftype, isDouble, rd, rn, disassembly: `fcvtzs ${gprPrefix}${rd}, ${p}${rn}` };
+        }
+        if (opcode === 0b00001 || opcode === 0b11001) { // FCVTZU
+          return { type: InstructionType.FCVTZU, raw, sf, ftype, isDouble, rd, rn, disassembly: `fcvtzu ${gprPrefix}${rd}, ${p}${rn}` };
+        }
+        if (opcode === 0b00010) { // SCVTF
+          return { type: InstructionType.SCVTF, raw, sf, ftype, isDouble, rd, rn, disassembly: `scvtf ${p}${rd}, ${gprPrefix}${rn}` };
+        }
+        if (opcode === 0b00011) { // UCVTF
+          return { type: InstructionType.UCVTF, raw, sf, ftype, isDouble, rd, rn, disassembly: `ucvtf ${p}${rd}, ${gprPrefix}${rn}` };
+        }
+        if (opcode === 0b00110) { // FMOV (FPR to GPR)
+          return { type: InstructionType.FMOV, raw, sf, ftype, isDouble, isFprToGpr: true, rd, rn, disassembly: `fmov ${gprPrefix}${rd}, ${p}${rn}` };
+        }
+        if (opcode === 0b00111) { // FMOV (GPR to FPR)
+          return { type: InstructionType.FMOV, raw, sf, ftype, isDouble, isGprToFpr: true, rd, rn, disassembly: `fmov ${p}${rd}, ${gprPrefix}${rn}` };
+        }
+      }
+
+      // (d) FP 1-source: bit 14 set or bits [15:10] in 0x10..0x30
+      if ((raw & 0x5f207c00) === 0x1e204000 || (b15_10 & 0x10) !== 0) {
+        const opcode = (raw >>> 15) & 0x3f;
+        if (opcode === 0b000000) {
+          return { type: InstructionType.FMOV, raw, ftype, isDouble, rd, rn, disassembly: `fmov ${p}${rd}, ${p}${rn}` };
+        }
+        if (opcode === 0b000001) {
+          return { type: InstructionType.FABS, raw, ftype, isDouble, rd, rn, disassembly: `fabs ${p}${rd}, ${p}${rn}` };
+        }
+        if (opcode === 0b000010) {
+          return { type: InstructionType.FNEG, raw, ftype, isDouble, rd, rn, disassembly: `fneg ${p}${rd}, ${p}${rn}` };
+        }
+        if (opcode === 0b000011) {
+          return { type: InstructionType.FSQRT, raw, ftype, isDouble, rd, rn, disassembly: `fsqrt ${p}${rd}, ${p}${rn}` };
+        }
+        if (opcode === 0b000100 || opcode === 0b000101) {
+          // FCVT: precision conversion
+          const dstDouble = (opcode === 0b000101) ? (ftype === 0) : !isDouble;
+          const dstP = dstDouble ? "d" : "s";
+          const srcP = isDouble ? "d" : "s";
+          return { type: InstructionType.FCVT, raw, ftype, isDouble, dstDouble, rd, rn, disassembly: `fcvt ${dstP}${rd}, ${srcP}${rn}` };
+        }
+      }
+
+      // (e) FP Immediate: bits [15:10] == 000100 (0x04)
+      if (b15_10 === 0x04 || (raw & 0xff200000) === 0x1e201000) {
+        const imm8 = (raw >>> 13) & 0xff;
+        const sign = (imm8 >> 7) & 1;
+        const exp = ((imm8 >> 4) & 7) ^ 4;
+        const mant = imm8 & 0xf;
+        const immValue = (sign ? -1 : 1) * (1 + mant / 16) * Math.pow(2, exp - 3);
+        return { type: InstructionType.FMOV, raw, ftype, isDouble, isImm: true, immValue, rd, disassembly: `fmov ${p}${rd}, #${immValue}` };
+      }
+    }
+
+    // 5.2 NEON / Advanced SIMD (bit 28 is 0)
+    const Q = (raw >>> 30) & 1;
+    const U = (raw >>> 29) & 1;
+    const size = (raw >>> 22) & 0b11;
+    const lanes = Q ? (size === 0 ? 16 : size === 1 ? 8 : size === 2 ? 4 : 2)
+                    : (size === 0 ? 8 : size === 1 ? 4 : size === 2 ? 2 : 1);
+    const elemStr = size === 0 ? "b" : size === 1 ? "h" : size === 2 ? "s" : "d";
+    const arrStr = `${lanes}${elemStr}`;
+
+    // (a) Advanced SIMD Copy / Splat (DUP, INS, UMOV)
+    // Mask: (raw & 0x9f000400) === 0x0e000400
+    if ((raw & 0x9f000400) === 0x0e000400) {
+      const imm5 = (raw >>> 16) & 0x1f;
+      const op = (raw >>> 29) & 1;
+      let elemSize = -1;
+      let lane = 0;
+
+      if (imm5 & 1) { elemSize = 0; lane = imm5 >> 1; }
+      else if (imm5 & 2) { elemSize = 1; lane = imm5 >> 2; }
+      else if (imm5 & 4) { elemSize = 2; lane = imm5 >> 3; }
+      else if (imm5 & 8) { elemSize = 3; lane = imm5 >> 4; }
+
+      if (elemSize >= 0) {
+        const subOp = (raw >>> 11) & 0xf;
+        const eStr = elemSize === 0 ? "b" : elemSize === 1 ? "h" : elemSize === 2 ? "s" : "d";
+        const lCount = Q ? (elemSize === 0 ? 16 : elemSize === 1 ? 8 : elemSize === 2 ? 4 : 2)
+                         : (elemSize === 0 ? 8 : elemSize === 1 ? 4 : elemSize === 2 ? 2 : 1);
+        const aStr = `${lCount}${eStr}`;
+
+        // DUP element: subOp == 0000
+        if (subOp === 0b0000 && op === 0) {
+          return { type: InstructionType.DUP_ELEM, raw, Q, elemSize, lane, rd, rn, disassembly: `dup v${rd}.${aStr}, v${rn}.${eStr}[${lane}]` };
+        }
+        // DUP general register: subOp == 0001
+        if (subOp === 0b0001 && op === 0) {
+          const gpr = (elemSize === 3) ? `x${rn}` : `w${rn}`;
+          return { type: InstructionType.DUP_GEN, raw, Q, elemSize, rd, rn, disassembly: `dup v${rd}.${aStr}, ${gpr}` };
+        }
+        // INS general register into lane: subOp == 0011 && op == 0
+        if (subOp === 0b0011 && op === 0) {
+          const gpr = (elemSize === 3) ? `x${rn}` : `w${rn}`;
+          return { type: InstructionType.INS_GEN, raw, elemSize, lane, rd, rn, disassembly: `ins v${rd}.${eStr}[${lane}], ${gpr}` };
+        }
+        // UMOV (extract vector lane to general register): subOp == 0111 && op == 0
+        if (subOp === 0b0111 && op === 0) {
+          const gpr = (elemSize === 3) ? `x${rd}` : `w${rd}`;
+          return { type: InstructionType.UMOV_ELEM, raw, elemSize, lane, rd, rn, disassembly: `umov ${gpr}, v${rn}.${eStr}[${lane}]` };
+        }
+      }
+    }
+
+    // (b) NEON 3-same Vector Floating-Point
+    const floatLanes = Q ? (size === 0 ? 4 : 2) : (size === 0 ? 2 : 1);
+    const floatArr = `${floatLanes}${size === 0 ? "s" : "d"}`;
+
+    if ((raw & 0xbf20fc00) === 0x0e20d400) {
+      return { type: InstructionType.FADD_VEC, raw, Q, size, isDouble: size === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fadd v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    }
+    if ((raw & 0xbf20fc00) === 0x0ea0d400) {
+      return { type: InstructionType.FSUB_VEC, raw, Q, size, isDouble: size === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fsub v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    }
+    if ((raw & 0xbf20fc00) === 0x2e20dc00) {
+      return { type: InstructionType.FMUL_VEC, raw, Q, size, isDouble: size === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fmul v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    }
+    if ((raw & 0xbf20fc00) === 0x2ea0fc00) {
+      return { type: InstructionType.FDIV_VEC, raw, Q, size, isDouble: size === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fdiv v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    }
+    if ((raw & 0xbf20fc00) === 0x2e20d400) {
+      return { type: InstructionType.FADDP_VEC, raw, Q, size, isDouble: size === 1, lanes: floatLanes, rd, rn, rm, disassembly: `faddp v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    }
+    if ((raw & 0xbf20fc00) === 0x0e20f400) {
+      return { type: InstructionType.FMAX_VEC, raw, Q, size, isDouble: size === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fmax v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    }
+    if ((raw & 0xbf20fc00) === 0x0ea0f400) {
+      return { type: InstructionType.FMIN_VEC, raw, Q, size, isDouble: size === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fmin v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    }
+
+    // (c) NEON 3-same Vector Integer Arithmetic & Logic
+    if ((raw & 0xbf20fc00) === 0x0e208400) {
+      return { type: InstructionType.ADD_VEC, raw, Q, size, lanes, rd, rn, rm, disassembly: `add v${rd}.${arrStr}, v${rn}.${arrStr}, v${rm}.${arrStr}` };
+    }
+    if ((raw & 0xbf20fc00) === 0x2e208400) {
+      return { type: InstructionType.SUB_VEC, raw, Q, size, lanes, rd, rn, rm, disassembly: `sub v${rd}.${arrStr}, v${rn}.${arrStr}, v${rm}.${arrStr}` };
+    }
+    if ((raw & 0xbf20fc00) === 0x0e209c00) {
+      return { type: InstructionType.MUL_VEC, raw, Q, size, lanes, rd, rn, rm, disassembly: `mul v${rd}.${arrStr}, v${rn}.${arrStr}, v${rm}.${arrStr}` };
+    }
+    if ((raw & 0xbf20fc00) === 0x0e20b400) {
+      return { type: InstructionType.ADDP_VEC, raw, Q, size, lanes, rd, rn, rm, disassembly: `addp v${rd}.${arrStr}, v${rn}.${arrStr}, v${rm}.${arrStr}` };
+    }
+    if ((raw & 0xbfe0fc00) === 0x0e201c00) {
+      return { type: InstructionType.AND_VEC, raw, Q, rd, rn, rm, disassembly: `and v${rd}.16b, v${rn}.16b, v${rm}.16b` };
+    }
+    if ((raw & 0xbfe0fc00) === 0x0ea01c00) {
+      return { type: InstructionType.ORR_VEC, raw, Q, rd, rn, rm, disassembly: `orr v${rd}.16b, v${rn}.16b, v${rm}.16b` };
+    }
+    if ((raw & 0xbfe0fc00) === 0x2e201c00) {
+      return { type: InstructionType.EOR_VEC, raw, Q, rd, rn, rm, disassembly: `eor v${rd}.16b, v${rn}.16b, v${rm}.16b` };
+    }
+    if ((raw & 0xbfe0fc00) === 0x2ea01c00) {
+      return { type: InstructionType.NOT_VEC, raw, Q, rd, rn, disassembly: `mvn v${rd}.16b, v${rn}.16b` };
+    }
+
+    // (d) NEON 2-register Misc (Float Neg & Abs)
+    if ((raw & 0xbfa0fc00) === 0x2ea0f400) {
+      return { type: InstructionType.FNEG_VEC, raw, Q, size, lanes: floatLanes, rd, rn, disassembly: `fneg v${rd}.${floatArr}, v${rn}.${floatArr}` };
+    }
+    if ((raw & 0xbfa0fc00) === 0x0ea0f400) {
+      return { type: InstructionType.FABS_VEC, raw, Q, size, lanes: floatLanes, rd, rn, disassembly: `fabs v${rd}.${floatArr}, v${rn}.${floatArr}` };
+    }
+
+    return { type: InstructionType.UNKNOWN, raw, disassembly: `unknown fp/neon 0x${raw.toString(16)}` };
   }
 }

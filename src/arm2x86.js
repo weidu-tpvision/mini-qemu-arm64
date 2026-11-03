@@ -570,6 +570,187 @@ export class Arm2X86Translator {
           break;
         }
 
+        // --- Floating-Point & NEON SIMD Translation to x86-64 SSE/AVX ---
+        case InstructionType.FADD:
+        case InstructionType.FSUB:
+        case InstructionType.FMUL:
+        case InstructionType.FDIV: {
+          const isD = decoded.isDouble;
+          const op = decoded.type === InstructionType.FADD ? (isD ? "addsd" : "addss") :
+                     decoded.type === InstructionType.FSUB ? (isD ? "subsd" : "subss") :
+                     decoded.type === InstructionType.FMUL ? (isD ? "mulsd" : "mulss") : (isD ? "divsd" : "divss");
+          const dXmm = `xmm${decoded.rd % 16}`;
+          const nXmm = `xmm${decoded.rn % 16}`;
+          const mXmm = `xmm${decoded.rm % 16}`;
+          x86Asm = `mov${isD ? "sd" : "ss"} ${dXmm}, ${nXmm} ; ${op} ${dXmm}, ${mXmm}`;
+          x86Bytes = [0xf3, 0x0f, 0x10, 0xc0];
+          break;
+        }
+
+        case InstructionType.FSQRT: {
+          const isD = decoded.isDouble;
+          const op = isD ? "sqrtsd" : "sqrtss";
+          const dXmm = `xmm${decoded.rd % 16}`;
+          const nXmm = `xmm${decoded.rn % 16}`;
+          x86Asm = `${op} ${dXmm}, ${nXmm}`;
+          x86Bytes = [isD ? 0xf2 : 0xf3, 0x0f, 0x51, 0xc0];
+          break;
+        }
+
+        case InstructionType.FNEG:
+        case InstructionType.FABS: {
+          const isD = decoded.isDouble;
+          const op = decoded.type === InstructionType.FNEG ? (isD ? "xorpd" : "xorps") : (isD ? "andpd" : "andps");
+          const dXmm = `xmm${decoded.rd % 16}`;
+          const nXmm = `xmm${decoded.rn % 16}`;
+          x86Asm = `mov${isD ? "sd" : "ss"} ${dXmm}, ${nXmm} ; ${op} ${dXmm}, [rip + ${decoded.type === InstructionType.FNEG ? "sign_mask" : "abs_mask"}]`;
+          x86Bytes = [0x0f, 0x57, 0xc0];
+          break;
+        }
+
+        case InstructionType.FCMP: {
+          const isD = decoded.isDouble;
+          const op = isD ? "ucomisd" : "ucomiss";
+          const nXmm = `xmm${decoded.rn % 16}`;
+          const mXmm = decoded.isZero ? "xmm15" : `xmm${decoded.rm % 16}`;
+          x86Asm = `${op} ${nXmm}, ${mXmm}`;
+          x86Bytes = [0x0f, 0x2e, 0xc0];
+          break;
+        }
+
+        case InstructionType.FMOV: {
+          const isD = decoded.isDouble;
+          const xmm = `xmm${decoded.rd % 16}`;
+          if (decoded.isImm) {
+            x86Asm = `mov${isD ? "sd" : "ss"} ${xmm}, [rip + const_${decoded.immValue}]`;
+          } else if (decoded.isFprToGpr) {
+            const gpr = decoded.sf === 1 ? this.reg(decoded.rd) : this.reg32(decoded.rd);
+            x86Asm = `movq ${gpr}, xmm${decoded.rn % 16}`;
+          } else if (decoded.isGprToFpr) {
+            const gpr = decoded.sf === 1 ? this.reg(decoded.rn) : this.reg32(decoded.rn);
+            x86Asm = `movq ${xmm}, ${gpr}`;
+          } else {
+            x86Asm = `mov${isD ? "sd" : "ss"} ${xmm}, xmm${decoded.rn % 16}`;
+          }
+          x86Bytes = [0xf3, 0x0f, 0x10, 0xc0];
+          break;
+        }
+
+        case InstructionType.SCVTF: {
+          const isD = decoded.isDouble;
+          const op = isD ? "cvtsi2sd" : "cvtsi2ss";
+          const gpr = decoded.sf === 1 ? this.reg(decoded.rn) : this.reg32(decoded.rn);
+          x86Asm = `${op} xmm${decoded.rd % 16}, ${gpr}`;
+          x86Bytes = [0xf3, 0x48, 0x0f, 0x2a, 0xc0];
+          break;
+        }
+
+        case InstructionType.FCVTZS: {
+          const isD = decoded.isDouble;
+          const op = isD ? "cvttsd2si" : "cvttss2si";
+          const gpr = decoded.sf === 1 ? this.reg(decoded.rd) : this.reg32(decoded.rd);
+          x86Asm = `${op} ${gpr}, xmm${decoded.rn % 16}`;
+          x86Bytes = [0xf3, 0x48, 0x0f, 0x2c, 0xc0];
+          break;
+        }
+
+        case InstructionType.LDR_FREG:
+        case InstructionType.STR_FREG: {
+          const isD = decoded.isDouble;
+          const op = isD ? "movsd" : "movss";
+          const xmm = `xmm${decoded.rt % 16}`;
+          const rn = this.reg(decoded.rn);
+          const off = decoded.offsetBytes ? (decoded.offsetBytes > 0 ? `+${decoded.offsetBytes}` : `${decoded.offsetBytes}`) : "";
+          x86Asm = decoded.type === InstructionType.LDR_FREG
+            ? `${op} ${xmm}, [${rn}${off}]`
+            : `${op} [${rn}${off}], ${xmm}`;
+          x86Bytes = [0xf3, 0x0f, 0x10, 0x04, 0x24];
+          break;
+        }
+
+        case InstructionType.LDR_VREG:
+        case InstructionType.STR_VREG: {
+          const xmm = `xmm${decoded.rt % 16}`;
+          const rn = this.reg(decoded.rn);
+          const off = decoded.offsetBytes ? (decoded.offsetBytes > 0 ? `+${decoded.offsetBytes}` : `${decoded.offsetBytes}`) : "";
+          x86Asm = decoded.type === InstructionType.LDR_VREG
+            ? `movdqu ${xmm}, [${rn}${off}]`
+            : `movdqu [${rn}${off}], ${xmm}`;
+          x86Bytes = [0xf3, 0x0f, 0x6f, 0x04, 0x24];
+          break;
+        }
+
+        case InstructionType.FADD_VEC:
+        case InstructionType.FSUB_VEC:
+        case InstructionType.FMUL_VEC:
+        case InstructionType.FDIV_VEC: {
+          const isD = decoded.isDouble;
+          const op = decoded.type === InstructionType.FADD_VEC ? (isD ? "addpd" : "addps") :
+                     decoded.type === InstructionType.FSUB_VEC ? (isD ? "subpd" : "subps") :
+                     decoded.type === InstructionType.FMUL_VEC ? (isD ? "mulpd" : "mulps") : (isD ? "divpd" : "divps");
+          const dXmm = `xmm${decoded.rd % 16}`;
+          const nXmm = `xmm${decoded.rn % 16}`;
+          const mXmm = `xmm${decoded.rm % 16}`;
+          x86Asm = `movaps ${dXmm}, ${nXmm} ; ${op} ${dXmm}, ${mXmm}`;
+          x86Bytes = [0x0f, 0x28, 0xc0, 0x0f, 0x58, 0xc0];
+          break;
+        }
+
+        case InstructionType.FADDP_VEC: {
+          const isD = decoded.isDouble;
+          const op = isD ? "haddpd" : "haddps";
+          const dXmm = `xmm${decoded.rd % 16}`;
+          const nXmm = `xmm${decoded.rn % 16}`;
+          const mXmm = `xmm${decoded.rm % 16}`;
+          x86Asm = `movaps ${dXmm}, ${nXmm} ; ${op} ${dXmm}, ${mXmm}`;
+          x86Bytes = [0x66, 0x0f, 0x7c, 0xc0];
+          break;
+        }
+
+        case InstructionType.ADD_VEC:
+        case InstructionType.SUB_VEC:
+        case InstructionType.MUL_VEC: {
+          const op = decoded.type === InstructionType.ADD_VEC ? "paddd" :
+                     decoded.type === InstructionType.SUB_VEC ? "psubd" : "pmulld";
+          const dXmm = `xmm${decoded.rd % 16}`;
+          const nXmm = `xmm${decoded.rn % 16}`;
+          const mXmm = `xmm${decoded.rm % 16}`;
+          x86Asm = `movdqa ${dXmm}, ${nXmm} ; ${op} ${dXmm}, ${mXmm}`;
+          x86Bytes = [0x66, 0x0f, 0xfe, 0xc0];
+          break;
+        }
+
+        case InstructionType.AND_VEC:
+        case InstructionType.ORR_VEC:
+        case InstructionType.EOR_VEC: {
+          const op = decoded.type === InstructionType.AND_VEC ? "pand" :
+                     decoded.type === InstructionType.ORR_VEC ? "por" : "pxor";
+          const dXmm = `xmm${decoded.rd % 16}`;
+          const nXmm = `xmm${decoded.rn % 16}`;
+          const mXmm = `xmm${decoded.rm % 16}`;
+          x86Asm = `movdqa ${dXmm}, ${nXmm} ; ${op} ${dXmm}, ${mXmm}`;
+          x86Bytes = [0x66, 0x0f, 0xef, 0xc0];
+          break;
+        }
+
+        case InstructionType.DUP_GEN: {
+          const xmm = `xmm${decoded.rd % 16}`;
+          const gpr = decoded.elemSize === 3 ? this.reg(decoded.rn) : this.reg32(decoded.rn);
+          x86Asm = `movd ${xmm}, ${gpr} ; pshufd ${xmm}, ${xmm}, 0x00`;
+          x86Bytes = [0x66, 0x0f, 0x6e, 0xc0, 0x66, 0x0f, 0x70, 0xc0, 0x00];
+          break;
+        }
+
+        case InstructionType.UMOV_ELEM: {
+          const xmm = `xmm${decoded.rn % 16}`;
+          const gpr = decoded.elemSize === 3 ? this.reg(decoded.rd) : this.reg32(decoded.rd);
+          x86Asm = decoded.lane === 0
+            ? `movd ${gpr}, ${xmm}`
+            : `pextrd ${gpr}, ${xmm}, ${decoded.lane}`;
+          x86Bytes = [0x66, 0x0f, 0x7e, 0xc0];
+          break;
+        }
+
         case InstructionType.SVC: {
           // In x86-64 Linux: syscall (0x0F, 0x05).
           x86Asm = `mov rdi, rax ; mov rax, 60 ; syscall`;

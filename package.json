@@ -4,12 +4,12 @@
   "type": "module",
   "description": "Educational ARM64 (AArch64) User-Space CPU Emulator & Binary Translators",
   "scripts": {
-    "test": "node tests/test_decoder.js && node tests/test_ui_api.js && node tests/test_server.js && node tests/test_syscalls.js && node tests/test_abi_and_compiler.js && node tests/test_graphics.js && node tests/test_interactive.js && node tests/test_dynamic_memory.js",
+    "test": "node tests/test_decoder.js && node tests/test_ui_api.js && node tests/test_server.js && node tests/test_syscalls.js && node tests/test_abi_and_compiler.js && node tests/test_graphics.js && node tests/test_interactive.js && node tests/test_dynamic_memory.js && node tests/test_neon_fp.js",
     "ui": "node tools/server.js",
     "serve": "node tools/server.js",
     "start": "node src/emulator.js bin/fib.elf",
     "recompile": "node src/static_recompiler.js",
     "translate": "node src/arm2x86.js bin/fib.elf",
-    "build-elfs": "node tools/elf_builder.js && node tools/build_hello_elf.js && node tools/build_math_elf.js && node tools/build_fib_rec_elf.js && node tools/build_heap_demo_elf.js && node tools/build_graphics_elf.js && node tools/build_interactive_elf.js && node tools/build_dynamic_memory_elf.js"
+    "build-elfs": "node tools/elf_builder.js && node tools/build_hello_elf.js && node tools/build_math_elf.js && node tools/build_fib_rec_elf.js && node tools/build_heap_demo_elf.js && node tools/build_graphics_elf.js && node tools/build_interactive_elf.js && node tools/build_dynamic_memory_elf.js && node tools/build_neon_matrix_elf.js"
   }
 }

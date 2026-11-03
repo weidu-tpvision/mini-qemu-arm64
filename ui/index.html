@@ -100,8 +100,14 @@
         </div>
       </div>
 
+      <!-- Register Mode Tabs: General Purpose (X0-X30) vs Floating Point & NEON (V0-V31) -->
+      <div style="display: flex; gap: 4px; padding: 6px 12px; background: rgba(0,0,0,0.25); border-bottom: 1px solid var(--border-color);">
+        <button class="btn btn-secondary active" id="tabGprRegs" style="padding: 2px 8px; font-size: 11px;">GPR (X0–X30)</button>
+        <button class="btn btn-secondary" id="tabNeonRegs" style="padding: 2px 8px; font-size: 11px;">FP / NEON (V0–V31)</button>
+      </div>
+
       <!-- General-Purpose Registers X0 to X30 -->
-      <div class="panel-body">
+      <div class="panel-body" id="gprTableContainer">
         <table class="regs-table">
           <thead>
             <tr>
@@ -111,6 +117,22 @@
             </tr>
           </thead>
           <tbody id="regsTableBody">
+            <!-- Populated dynamically by app.js -->
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Floating-Point & NEON SIMD Registers V0 to V31 -->
+      <div class="panel-body" id="neonTableContainer" style="display: none;">
+        <table class="regs-table">
+          <thead>
+            <tr>
+              <th style="width: 72px;">Vector</th>
+              <th>Scalar Double (D)</th>
+              <th style="text-align: right;">NEON 4×Float32 Vector (Q)</th>
+            </tr>
+          </thead>
+          <tbody id="neonTableBody">
             <!-- Populated dynamically by app.js -->
           </tbody>
         </table>
