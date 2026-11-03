@@ -64,6 +64,12 @@ const BINARY_DESCRIPTIONS = {
     title: "Demoscene Color Plasma",
     desc: "Level 1 MMIO graphics: Procedural demoscene plasma field rendering 76,800 32-bit RGBA pixels into VRAM.",
     category: "Graphics & Framebuffer"
+  },
+  "interactive_paint.elf": {
+    name: "interactive_paint.elf",
+    title: "Interactive Canvas Painter & Gamepad",
+    desc: "Interactive MMIO input & 60 FPS graphics: Move cursor with Arrow Keys/WASD, Paint with Space/Mouse, change colors with Shift, clear with R.",
+    category: "Graphics & Interactive Input"
   }
 };
 

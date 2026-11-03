@@ -3,6 +3,10 @@ import { MiniQEMU } from "/src/emulator.js";
 import { Decoder, InstructionType } from "/src/decoder.js";
 import { Arm2X86Translator } from "/src/arm2x86.js";
 import { StaticRecompiler } from "/src/static_recompiler.js";
+import {
+  KEY_MASK_UP, KEY_MASK_DOWN, KEY_MASK_LEFT, KEY_MASK_RIGHT,
+  KEY_MASK_ACTION_A, KEY_MASK_ACTION_B, KEY_MASK_RESET
+} from "/src/memory.js";
 
 // DOM Elements
 const programSelect = document.getElementById("programSelect");
@@ -625,7 +629,9 @@ function updateTranslatedViews(buffer, name) {
 // 6. Level 1 MMIO Virtual Screen Renderer & Pixel Probe
 function isGraphicsBinary(filename = "") {
   const f = filename.toLowerCase();
-  return f.includes("graphics") || f.includes("plasma") || f.includes("pattern") || f.includes("screen") || f.includes("framebuffer");
+  return f.includes("graphics") || f.includes("plasma") || f.includes("pattern") ||
+         f.includes("screen") || f.includes("framebuffer") || f.includes("paint") ||
+         f.includes("interactive");
 }
 
 function switchMemoryTab(tabId) {
@@ -715,6 +721,8 @@ function stepSingle() {
   if (res.halted) {
     stopRunning();
     renderVramScreen(true);
+  } else if (res.yielded) {
+    renderVramScreen(true);
   } else if (res.hitBreakpoint) {
     stopRunning();
     setStatus("PAUSED", `BP @ 0x${res.nextPC.toString(16).padStart(8, "0")}`, "status-paused");
@@ -750,6 +758,13 @@ function startRunning() {
             stopRunning();
             setStatus("PAUSED", `BP @ 0x${lastRes.nextPC.toString(16)}`, "status-paused");
           }
+          return;
+        }
+        if (lastRes.yielded) {
+          changedMemoryBytes = new Set(lastRes.changedMem || []);
+          updateCPUState(lastRes.changedRegs);
+          renderVramScreen(true);
+          runTimer = requestAnimationFrame(turboLoop);
           return;
         }
       }
@@ -1031,6 +1046,48 @@ if (crtScanlineToggle && scanlineOverlay) {
   });
 }
 
+let activeKeyMask = 0;
+let isCanvasMouseDown = false;
+
+function updateInputState(lastKey = 0) {
+  emulator.setKeyState(activeKeyMask, lastKey);
+
+  const dpadUp = document.getElementById("dpadUp");
+  const dpadDown = document.getElementById("dpadDown");
+  const dpadLeft = document.getElementById("dpadLeft");
+  const dpadRight = document.getElementById("dpadRight");
+  const btnA = document.getElementById("btnActionA");
+  const btnB = document.getElementById("btnActionB");
+  const btnR = document.getElementById("btnActionR");
+
+  if (dpadUp) dpadUp.classList.toggle("active", (activeKeyMask & KEY_MASK_UP) !== 0);
+  if (dpadDown) dpadDown.classList.toggle("active", (activeKeyMask & KEY_MASK_DOWN) !== 0);
+  if (dpadLeft) dpadLeft.classList.toggle("active", (activeKeyMask & KEY_MASK_LEFT) !== 0);
+  if (dpadRight) dpadRight.classList.toggle("active", (activeKeyMask & KEY_MASK_RIGHT) !== 0);
+  if (btnA) btnA.classList.toggle("active", (activeKeyMask & KEY_MASK_ACTION_A) !== 0);
+  if (btnB) btnB.classList.toggle("active", (activeKeyMask & KEY_MASK_ACTION_B) !== 0);
+  if (btnR) btnR.classList.toggle("active", (activeKeyMask & KEY_MASK_RESET) !== 0);
+
+  const badge = document.getElementById("inputStatusBadge");
+  if (badge) {
+    if (activeKeyMask !== 0) {
+      const activeKeys = [];
+      if (activeKeyMask & KEY_MASK_UP) activeKeys.push("UP");
+      if (activeKeyMask & KEY_MASK_DOWN) activeKeys.push("DOWN");
+      if (activeKeyMask & KEY_MASK_LEFT) activeKeys.push("LEFT");
+      if (activeKeyMask & KEY_MASK_RIGHT) activeKeys.push("RIGHT");
+      if (activeKeyMask & KEY_MASK_ACTION_A) activeKeys.push("PAINT");
+      if (activeKeyMask & KEY_MASK_ACTION_B) activeKeys.push("COLOR");
+      if (activeKeyMask & KEY_MASK_RESET) activeKeys.push("RESET");
+      badge.textContent = `🎮 ${activeKeys.join(" + ")}`;
+      badge.style.color = "var(--accent-cyan)";
+    } else {
+      badge.textContent = "🎮 Keyboard / Pointer Ready";
+      badge.style.color = "";
+    }
+  }
+}
+
 if (vramCanvas) {
   const getCanvasPixelCoords = (e) => {
     const rect = vramCanvas.getBoundingClientRect();
@@ -1040,8 +1097,19 @@ if (vramCanvas) {
     return { x, y };
   };
 
+  vramCanvas.addEventListener("mousedown", (e) => {
+    isCanvasMouseDown = true;
+    const { x, y } = getCanvasPixelCoords(e);
+    emulator.setPointerState(x, y, 1);
+    activeKeyMask |= KEY_MASK_ACTION_A;
+    updateInputState();
+  });
+
   vramCanvas.addEventListener("mousemove", (e) => {
     const { x, y } = getCanvasPixelCoords(e);
+    if (isCanvasMouseDown) {
+      emulator.setPointerState(x, y, 1);
+    }
     const px = emulator.readVramPixel(x, y);
     const addr = 0x00800000 + (y * FB_WIDTH + x) * 4;
     const hexColor = `#${px.r.toString(16).padStart(2, "0")}${px.g.toString(16).padStart(2, "0")}${px.b.toString(16).padStart(2, "0")}`.toUpperCase();
@@ -1051,23 +1119,75 @@ if (vramCanvas) {
     if (pixelRgbaText) pixelRgbaText.textContent = `${hexColor} (${px.r},${px.g},${px.b})`;
   });
 
-  vramCanvas.addEventListener("click", (e) => {
-    const { x, y } = getCanvasPixelCoords(e);
-    const addr = 0x00800000 + (y * FB_WIDTH + x) * 4;
-    switchMemoryTab("hexView");
-    updateMemoryGrid(addr);
-  });
+  const stopCanvasDrag = () => {
+    if (isCanvasMouseDown) {
+      isCanvasMouseDown = false;
+      activeKeyMask &= ~KEY_MASK_ACTION_A;
+      emulator.setPointerState(0, 0, 0);
+      updateInputState();
+    }
+  };
+
+  vramCanvas.addEventListener("mouseup", stopCanvasDrag);
+  vramCanvas.addEventListener("mouseleave", stopCanvasDrag);
 }
+
+// Wire on-screen D-Pad and Action buttons
+const bindPressButton = (id, mask) => {
+  const btn = document.getElementById(id);
+  if (!btn) return;
+  const start = (e) => {
+    e.preventDefault();
+    activeKeyMask |= mask;
+    updateInputState();
+  };
+  const end = (e) => {
+    e.preventDefault();
+    activeKeyMask &= ~mask;
+    updateInputState();
+  };
+  btn.addEventListener("mousedown", start);
+  btn.addEventListener("mouseup", end);
+  btn.addEventListener("mouseleave", end);
+  btn.addEventListener("touchstart", start, { passive: false });
+  btn.addEventListener("touchend", end, { passive: false });
+};
+
+bindPressButton("dpadUp", KEY_MASK_UP);
+bindPressButton("dpadDown", KEY_MASK_DOWN);
+bindPressButton("dpadLeft", KEY_MASK_LEFT);
+bindPressButton("dpadRight", KEY_MASK_RIGHT);
+bindPressButton("btnActionA", KEY_MASK_ACTION_A);
+bindPressButton("btnActionB", KEY_MASK_ACTION_B);
+bindPressButton("btnActionR", KEY_MASK_RESET);
 
 pcBox.addEventListener("click", () => updateMemoryGrid(Number(emulator.cpu.pc)));
 spBox.addEventListener("click", () => updateMemoryGrid(Number(emulator.cpu.sp) - 32));
 fpBox.addEventListener("click", () => updateMemoryGrid(Number(emulator.cpu.getReg(29))));
 lrBox.addEventListener("click", () => updateMemoryGrid(Number(emulator.cpu.getReg(30))));
 
-// Keyboard Shortcuts: Space/F5 (Run/Pause), F10/S (Step), R (Reset)
+// Keyboard Event Handlers (Controls & Global Shortcuts)
 window.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
 
+  // 1. Check Interactive Gamepad Keys
+  let keyBit = 0;
+  if (e.code === "ArrowUp" || e.code === "KeyW") keyBit = KEY_MASK_UP;
+  else if (e.code === "ArrowDown" || e.code === "KeyS" && (isRunning || !e.ctrlKey)) keyBit = KEY_MASK_DOWN;
+  else if (e.code === "ArrowLeft" || e.code === "KeyA") keyBit = KEY_MASK_LEFT;
+  else if (e.code === "ArrowRight" || e.code === "KeyD") keyBit = KEY_MASK_RIGHT;
+  else if (e.code === "Space" && isRunning) keyBit = KEY_MASK_ACTION_A;
+  else if (e.code === "KeyZ" || e.code === "Enter") keyBit = KEY_MASK_ACTION_A;
+  else if (e.code === "ShiftLeft" || e.code === "ShiftRight" || e.code === "KeyX" || e.code === "KeyC") keyBit = KEY_MASK_ACTION_B;
+
+  if (keyBit !== 0) {
+    e.preventDefault();
+    activeKeyMask |= keyBit;
+    updateInputState(e.keyCode);
+    return;
+  }
+
+  // 2. Debugger Global Shortcuts
   if (e.code === "Space" || e.code === "F5") {
     e.preventDefault();
     if (isRunning) stopRunning();
@@ -1079,6 +1199,23 @@ window.addEventListener("keydown", (e) => {
   } else if (e.code === "KeyR" && !e.ctrlKey && !e.metaKey) {
     e.preventDefault();
     resetEmulator();
+  }
+});
+
+window.addEventListener("keyup", (e) => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+
+  let keyBit = 0;
+  if (e.code === "ArrowUp" || e.code === "KeyW") keyBit = KEY_MASK_UP;
+  else if (e.code === "ArrowDown" || e.code === "KeyS") keyBit = KEY_MASK_DOWN;
+  else if (e.code === "ArrowLeft" || e.code === "KeyA") keyBit = KEY_MASK_LEFT;
+  else if (e.code === "ArrowRight" || e.code === "KeyD") keyBit = KEY_MASK_RIGHT;
+  else if (e.code === "Space" || e.code === "KeyZ" || e.code === "Enter") keyBit = KEY_MASK_ACTION_A;
+  else if (e.code === "ShiftLeft" || e.code === "ShiftRight" || e.code === "KeyX" || e.code === "KeyC") keyBit = KEY_MASK_ACTION_B;
+
+  if (keyBit !== 0) {
+    activeKeyMask &= ~keyBit;
+    updateInputState();
   }
 });
 

@@ -20,6 +20,28 @@ const REG_MAP_64 = {
   31: "rsp", // Stack Pointer / Zero
 };
 
+const REG_MAP_32 = {
+  0: "eax",
+  1: "ebx",
+  2: "ecx",
+  3: "edx",
+  4: "esi",
+  5: "edi",
+  6: "r8d",
+  7: "r9d",
+  8: "r10d",
+  11: "r11d",
+  12: "r12d",
+  14: "r14d",
+  15: "r15d",
+  16: "r11d",
+  19: "r12d",
+  20: "r13d",
+  29: "ebp",
+  30: "r11d",
+  31: "esp",
+};
+
 const X86_REG_INDEX = {
   rax: 0, rcx: 1, rdx: 2, rbx: 3, rsp: 4, rbp: 5, rsi: 6, rdi: 7
 };
@@ -34,6 +56,10 @@ export class Arm2X86Translator {
   // Get x86 register name from ARM register index
   reg(armIndex) {
     return REG_MAP_64[armIndex] || `r${armIndex}`;
+  }
+
+  reg32(armIndex) {
+    return REG_MAP_32[armIndex] || `${this.reg(armIndex)}d`;
   }
 
   translate(writeFiles = true) {
@@ -73,7 +99,11 @@ export class Arm2X86Translator {
       if (
         inst.decoded.type === InstructionType.B_COND ||
         inst.decoded.type === InstructionType.B ||
-        inst.decoded.type === InstructionType.BL
+        inst.decoded.type === InstructionType.BL ||
+        inst.decoded.type === InstructionType.TBZ ||
+        inst.decoded.type === InstructionType.TBNZ ||
+        inst.decoded.type === InstructionType.CBZ ||
+        inst.decoded.type === InstructionType.CBNZ
       ) {
         const targetPC = inst.pc + inst.decoded.offsetBytes;
         if (!branchTargets.has(targetPC)) {
@@ -106,6 +136,16 @@ export class Arm2X86Translator {
             0x48, 0xc7, 0xc0 + regCode,
             imm32 & 0xff, (imm32 >>> 8) & 0xff, (imm32 >>> 16) & 0xff, (imm32 >>> 24) & 0xff
           ];
+          break;
+        }
+
+        case InstructionType.MOVK: {
+          const rd = this.reg(decoded.rd);
+          const shift = (decoded.hw ?? 0) * 16;
+          const mask = ~(0xffffn << BigInt(shift)) & 0xffffffffffffffffn;
+          const val = (BigInt(decoded.imm16) & 0xffffn) << BigInt(shift);
+          x86Asm = `and ${rd}, 0x${mask.toString(16)} ; or ${rd}, 0x${val.toString(16)}`;
+          x86Bytes = [0x90];
           break;
         }
 
@@ -473,6 +513,34 @@ export class Arm2X86Translator {
           x86Asm = `${x86Cond} ${label}`;
           x86Bytes = [opcode, 0x00]; // 2-byte short conditional jump (patched in Pass 2)
           relPatch = { type: "rel8", targetPC, patchIndex: 1 };
+          break;
+        }
+
+        case InstructionType.TBZ:
+        case InstructionType.TBNZ: {
+          const regName = decoded.sf === 0 ? this.reg32(decoded.rt) : this.reg(decoded.rt);
+          const bit = BigInt(decoded.bitPos ?? decoded.bit ?? 0);
+          const mask = 1n << bit;
+          const targetPC = pc + decoded.offsetBytes;
+          const label = branchTargets.get(targetPC) || `0x${targetPC.toString(16)}`;
+          const isTbz = decoded.type === InstructionType.TBZ;
+          x86Asm = `test ${regName}, 0x${mask.toString(16)} ; ${isTbz ? "jz" : "jnz"} ${label}`;
+          const opcode = isTbz ? 0x74 : 0x75;
+          x86Bytes = [0x85, 0xc0, opcode, 0x00];
+          relPatch = { type: "rel8", targetPC, patchIndex: 3 };
+          break;
+        }
+
+        case InstructionType.CBZ:
+        case InstructionType.CBNZ: {
+          const regName = decoded.sf === 0 ? this.reg32(decoded.rt) : this.reg(decoded.rt);
+          const targetPC = pc + decoded.offsetBytes;
+          const label = branchTargets.get(targetPC) || `0x${targetPC.toString(16)}`;
+          const isCbz = decoded.type === InstructionType.CBZ;
+          x86Asm = `test ${regName}, ${regName} ; ${isCbz ? "jz" : "jnz"} ${label}`;
+          const opcode = isCbz ? 0x74 : 0x75;
+          x86Bytes = [0x85, 0xc0, opcode, 0x00];
+          relPatch = { type: "rel8", targetPC, patchIndex: 3 };
           break;
         }
 

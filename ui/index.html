@@ -282,6 +282,26 @@
             <span class="mono pixel-addr" id="pixelAddrText">@ 0x00800000</span>
             <span class="mono pixel-rgba" id="pixelRgbaText">#000000</span>
           </div>
+          <!-- Interactive Gamepad & Keyboard Controls -->
+          <div class="interactive-controls-bar" id="interactiveControlsBar">
+            <div class="controller-dpad" title="Directional Controls (Arrow Keys / WASD)">
+              <button class="dpad-btn dpad-up" id="dpadUp" data-key="up">▲</button>
+              <div class="dpad-row">
+                <button class="dpad-btn dpad-left" id="dpadLeft" data-key="left">◀</button>
+                <div class="dpad-center"></div>
+                <button class="dpad-btn dpad-right" id="dpadRight" data-key="right">▶</button>
+              </div>
+              <button class="dpad-btn dpad-down" id="dpadDown" data-key="down">▼</button>
+            </div>
+            <div class="controller-actions">
+              <button class="action-btn action-paint" id="btnActionA" data-key="actionA" title="Paint Stroke (Space / Enter / Click)">[A] Paint</button>
+              <button class="action-btn action-color" id="btnActionB" data-key="actionB" title="Cycle Color (Shift / C)">[B] Color</button>
+              <button class="action-btn action-clear" id="btnActionR" data-key="reset" title="Clear Canvas (R)">[R] Clear</button>
+            </div>
+            <div class="controller-hints">
+              <span class="hint-badge" id="inputStatusBadge">🎮 Keyboard / Pointer Ready</span>
+            </div>
+          </div>
           <div class="screen-footer">
             <span>Frames: <span id="vramFrameCount" class="mono">0</span></span>
             <span id="vramFpsBadge" class="mono">0 FPS</span>

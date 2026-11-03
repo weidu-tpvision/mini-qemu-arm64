@@ -297,7 +297,8 @@ export class StaticRecompiler {
         }
 
         case InstructionType.SVC:
-          lines.push(`${indent}// Supervisor Call (${decoded.disassembly}): check X8 syscall (64=write, 93/94=exit)`);
+          lines.push(`${indent}// Supervisor Call (${decoded.disassembly}): check X8 syscall (64=write, 93/94=exit, 124=yield)`);
+          lines.push(`${indent}if (x[8] === 124n) { x[0] = 0n; }`);
           lines.push(`${indent}if (x[8] === 93n || x[8] === 94n) return Number(x[0]);`);
           break;
 

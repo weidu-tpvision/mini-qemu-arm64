@@ -1,5 +1,12 @@
 // emulator.js - Mini-QEMU ARM64 User-Space Emulator (32+ Core Instructions)
-import { Memory, VRAM_BASE, FB_WIDTH, FB_HEIGHT, FB_BPP, FB_SIZE, VRAM_END } from "./memory.js";
+import {
+  Memory,
+  VRAM_BASE, FB_WIDTH, FB_HEIGHT, FB_BPP, FB_SIZE, VRAM_END,
+  INPUT_BASE, INPUT_REG_KEY_STATE, INPUT_REG_LAST_KEY, INPUT_REG_POINTER_X,
+  INPUT_REG_POINTER_Y, INPUT_REG_POINTER_BTN, INPUT_REG_FRAME_COUNT,
+  KEY_MASK_UP, KEY_MASK_DOWN, KEY_MASK_LEFT, KEY_MASK_RIGHT,
+  KEY_MASK_ACTION_A, KEY_MASK_ACTION_B, KEY_MASK_RESET
+} from "./memory.js";
 import { CPU } from "./cpu.js";
 import { Decoder, InstructionType, ConditionCode } from "./decoder.js";
 import { ElfLoader } from "./elf_loader.js";
@@ -286,6 +293,44 @@ export class MiniQEMU {
     };
   }
 
+  // --- MMIO Interactive Input Helpers (Keyboard, Gamepad & Pointer) ---
+  setKeyState(keyMask, lastKey = 0) {
+    this.memory.write32(INPUT_REG_KEY_STATE, keyMask >>> 0);
+    if (lastKey) {
+      this.memory.write32(INPUT_REG_LAST_KEY, lastKey >>> 0);
+    }
+  }
+
+  setPointerState(x, y, buttons = 0) {
+    const clX = Math.max(0, Math.min(FB_WIDTH - 1, Math.floor(x)));
+    const clY = Math.max(0, Math.min(FB_HEIGHT - 1, Math.floor(y)));
+    this.memory.write32(INPUT_REG_POINTER_X, clX);
+    this.memory.write32(INPUT_REG_POINTER_Y, clY);
+    this.memory.write32(INPUT_REG_POINTER_BTN, buttons >>> 0);
+  }
+
+  getKeyState() {
+    return this.memory.read32(INPUT_REG_KEY_STATE);
+  }
+
+  getPointerState() {
+    return {
+      x: this.memory.read32(INPUT_REG_POINTER_X),
+      y: this.memory.read32(INPUT_REG_POINTER_Y),
+      buttons: this.memory.read32(INPUT_REG_POINTER_BTN)
+    };
+  }
+
+  getInputInfo() {
+    return {
+      base: INPUT_BASE,
+      keyState: this.getKeyState(),
+      lastKey: this.memory.read32(INPUT_REG_LAST_KEY),
+      pointer: this.getPointerState(),
+      frameCount: this.memory.read32(INPUT_REG_FRAME_COUNT)
+    };
+  }
+
   // Apply ARM64 barrel shifter (00=LSL, 01=LSR, 10=ASR)
   applyShift(value, shiftType = 0, amount = 0, sf = 1) {
     const bits = sf === 0 ? 32 : 64;
@@ -368,6 +413,7 @@ export class MiniQEMU {
 
     // 2. DECODE
     const decoded = Decoder.decode(rawInstr);
+    let isYield = false;
 
     // 3. EXECUTE
     switch (decoded.type) {
@@ -1128,6 +1174,11 @@ export class MiniQEMU {
           } else {
             this.cpu.setReg(0, BigInt.asUintN(64, -2n)); // -ENOENT
           }
+        } else if (syscallNum === 124) { // sys_sched_yield
+          const curFrames = this.memory.read32(INPUT_REG_FRAME_COUNT);
+          this.memory.write32(INPUT_REG_FRAME_COUNT, (curFrames + 1) >>> 0);
+          this.cpu.setReg(0, 0n);
+          isYield = true;
         } else if (syscallNum === 29 || syscallNum === 25) { // sys_ioctl (29), sys_fcntl (25)
           this.cpu.setReg(0, 0n);
         } else {
@@ -1167,6 +1218,7 @@ export class MiniQEMU {
       changedRegs,
       changedMem: Array.from(this.memory.lastWritten),
       halted: this.cpu.halted,
+      yielded: isYield,
       exitCode: this.cpu.exitCode,
       hitBreakpoint: this.breakpoints.has(nextPC)
     };

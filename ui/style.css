@@ -1026,3 +1026,122 @@ select:hover, select:focus {
   font-family: var(--font-mono);
   color: var(--text-primary);
 }
+
+/* Interactive Controller & D-Pad */
+.interactive-controls-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+}
+
+.controller-dpad {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.dpad-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.dpad-center {
+  width: 22px;
+  height: 22px;
+  background-color: var(--bg-input);
+  border-radius: 2px;
+}
+
+.dpad-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 10px;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.1s ease;
+}
+
+.dpad-btn:hover, .dpad-btn.active {
+  background-color: var(--accent-cyan);
+  color: #030508;
+  border-color: var(--accent-cyan);
+  transform: scale(1.08);
+}
+
+.controller-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.action-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.1s ease;
+}
+
+.action-paint {
+  background-color: rgba(6, 182, 212, 0.15);
+  color: var(--accent-cyan);
+  border: 1px solid rgba(6, 182, 212, 0.4);
+}
+
+.action-paint:hover, .action-paint.active {
+  background-color: var(--accent-cyan);
+  color: #030508;
+}
+
+.action-color {
+  background-color: rgba(245, 158, 11, 0.15);
+  color: var(--accent-amber);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+.action-color:hover, .action-color.active {
+  background-color: var(--accent-amber);
+  color: #030508;
+}
+
+.action-clear {
+  background-color: rgba(239, 68, 68, 0.15);
+  color: var(--accent-red);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+}
+
+.action-clear:hover, .action-clear.active {
+  background-color: var(--accent-red);
+  color: #fff;
+}
+
+.controller-hints {
+  display: flex;
+  align-items: center;
+}
+
+.hint-badge {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  background-color: var(--bg-input);
+  padding: 3px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+}

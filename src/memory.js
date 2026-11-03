@@ -12,6 +12,25 @@ export const FB_BPP = 4; // 32-bit RGBA (4 bytes per pixel)
 export const FB_SIZE = FB_WIDTH * FB_HEIGHT * FB_BPP; // 307,200 bytes (0x4B000)
 export const VRAM_END = VRAM_BASE + FB_SIZE; // 0x0084B000
 
+// --- MMIO Interactive Input Peripheral Constants (Keyboard, Gamepad & Pointer) ---
+export const INPUT_BASE = 0x00850000;
+export const INPUT_REG_KEY_STATE   = INPUT_BASE + 0x00; // 32-bit bitmask of held keys
+export const INPUT_REG_LAST_KEY    = INPUT_BASE + 0x04; // 32-bit ASCII / key code of last event
+export const INPUT_REG_POINTER_X   = INPUT_BASE + 0x08; // 32-bit Pointer X (0..319)
+export const INPUT_REG_POINTER_Y   = INPUT_BASE + 0x0C; // 32-bit Pointer Y (0..239)
+export const INPUT_REG_POINTER_BTN = INPUT_BASE + 0x10; // 32-bit Pointer buttons (bit 0=left, bit 1=right)
+export const INPUT_REG_FRAME_COUNT = INPUT_BASE + 0x14; // 32-bit VSync / frame yield counter
+export const INPUT_END             = INPUT_BASE + 0x1000; // 4 KB page
+
+// Key bitmask definitions for INPUT_REG_KEY_STATE
+export const KEY_MASK_UP       = 1 << 0; // 0x01 (Arrow Up / W)
+export const KEY_MASK_DOWN     = 1 << 1; // 0x02 (Arrow Down / S)
+export const KEY_MASK_LEFT     = 1 << 2; // 0x04 (Arrow Left / A)
+export const KEY_MASK_RIGHT    = 1 << 3; // 0x08 (Arrow Right / D)
+export const KEY_MASK_ACTION_A = 1 << 4; // 0x10 (Space / Enter / Z - Paint)
+export const KEY_MASK_ACTION_B = 1 << 5; // 0x20 (Shift / X / C - Change Color)
+export const KEY_MASK_RESET    = 1 << 6; // 0x40 (R - Clear Screen)
+
 export class Memory {
   constructor() {
     // Map of pageNumber (address >>> 12) -> Uint8Array(4096)

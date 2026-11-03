@@ -35,6 +35,12 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
   * 256-byte Memory Hex Inspector with ASCII preview and quick jumps (`.text`, `Stack (SP)`, `Data`).
   * Linux `sys_write` stdout terminal stream and exit status reporting.
   * Drag-and-drop custom ARM64 ELF binary loading and adjustable clock speed slider (1 Hz to Max/Turbo).
+* **Level 1 MMIO Graphics Framebuffer & Interactive Gamepad Input:**
+  * **Video RAM (VRAM) Base Address:** `0x00800000` to `0x0084B000` ($320 \times 240$ resolution at 32-bit RGBA = 307.2 KB).
+  * **Interactive MMIO Input Peripheral:** `0x00850000` mapping keyboard key states, pointer coordinates $(X, Y)$, and mouse buttons.
+  * **60 FPS Hardware VSync:** Uses Linux `sys_sched_yield` (`syscall 124`) to decouple guest CPU frame rendering from host display synchronization.
+  * **Interactive Workbench Display:** Live HTML5 canvas with CRT scanline simulation, instant frame blits, interactive pixel inspector probe, and virtual D-Pad / action button controls.
+  * **Bare-metal Demo Binaries:** `bin/graphics_pattern.elf` (SMPTE color bars), `bin/plasma.elf` (76,800-pixel demoscene plasma), and `bin/interactive_paint.elf` (interactive game/canvas painter).
 * **Architectural CPU State:**
   * 31 64-bit general-purpose registers (`X0`–`X30`) using native 64-bit unsigned integers (`BigUint64Array`).
   * Hardwired Zero Register (`XZR` reads 0, discards writes).
