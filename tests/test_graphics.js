@@ -2,6 +2,8 @@
 import assert from "assert";
 import { MiniQEMU } from "../src/emulator.js";
 import { Memory, VRAM_BASE, FB_WIDTH, FB_HEIGHT, FB_BPP, FB_SIZE, VRAM_END } from "../src/memory.js";
+import { StaticRecompiler } from "../src/static_recompiler.js";
+import { Arm2X86Translator } from "../src/arm2x86.js";
 
 console.log("Running Level 1 MMIO Graphics Framebuffer Tests...\n");
 
@@ -112,6 +114,22 @@ console.log("[PASS] Framebuffer dimensions & address space verified: 320x240 @ 3
   assert.deepStrictEqual(qemu.readVramPixel(0, 0), { r: 0, g: 0, b: 0, a: 255 });
   assert.deepStrictEqual(qemu.readVramPixel(160, 120), { r: 216, g: 24, b: 224, a: 255 });
   console.log(`[PASS] bin/plasma.elf executed in ${elapsed} ms (${qemu.cycleCount} cycles) -> 76,800 pixels procedural plasma verified`);
+}
+
+// 6. Test Translator Coverage (StaticRecompiler AOT & Arm2X86Translator) on Graphics Binaries
+{
+  for (const elfPath of ["bin/graphics_pattern.elf", "bin/plasma.elf"]) {
+    const aot = new StaticRecompiler(elfPath);
+    const jsCode = aot.recompile(false);
+    assert.ok(jsCode.includes("x[8] = 93n;") && jsCode.includes("if (x[8] === 93n || x[8] === 94n) return Number(x[0]);"), `${elfPath} AOT must reach final sys_exit svc #0`);
+    assert.ok(!jsCode.includes("UNHANDLED"), `${elfPath} AOT must not have unhandled instructions`);
+
+    const x86 = new Arm2X86Translator(elfPath);
+    const fullAsm = x86.translate(false);
+    assert.ok(!fullAsm.includes("[untranslated"), `${elfPath} x86-64 translation must have 0 untranslated instructions`);
+    assert.ok(fullAsm.includes("syscall") && fullAsm.includes("svc #0"), `${elfPath} x86-64 translation must reach final svc #0`);
+  }
+  console.log("[PASS] StaticRecompiler (AOT JS) & Arm2X86Translator (x86-64) 100% coverage on graphics binaries verified");
 }
 
 console.log("\nAll Level 1 MMIO Graphics Framebuffer Tests Passed Successfully!");

@@ -63,6 +63,9 @@ const hexTableBody = document.getElementById("hexTableBody");
 const stackTableBody = document.getElementById("stackTableBody");
 
 // Level 1 MMIO Virtual Screen Elements & Framebuffer State
+const memToolbar = document.getElementById("memToolbar");
+const vramHeaderBadge = document.getElementById("vramHeaderBadge");
+const instantRenderBtn = document.getElementById("instantRenderBtn");
 const vramCanvas = document.getElementById("vramCanvas");
 const vramCtx = vramCanvas ? vramCanvas.getContext("2d") : null;
 const scanlineOverlay = document.getElementById("scanlineOverlay");
@@ -70,6 +73,10 @@ const crtScanlineToggle = document.getElementById("crtScanlineToggle");
 const vramFrameCount = document.getElementById("vramFrameCount");
 const vramFpsBadge = document.getElementById("vramFpsBadge");
 const vramStatusText = document.getElementById("vramStatusText");
+const pixelSwatch = document.getElementById("pixelSwatch");
+const pixelCoordText = document.getElementById("pixelCoordText");
+const pixelAddrText = document.getElementById("pixelAddrText");
+const pixelRgbaText = document.getElementById("pixelRgbaText");
 const FB_WIDTH = 320;
 const FB_HEIGHT = 240;
 const FB_SIZE = FB_WIDTH * FB_HEIGHT * 4;
@@ -248,18 +255,28 @@ function disassembleLoadedBinary() {
 
   for (let addr = startAddr; addr < endAddr; ) {
     if (dataStartAddresses.has(addr) || addr + 4 > endAddr) {
-      // Render remaining bytes as embedded ASCII / byte data
-      const remLen = endAddr - addr;
-      const bytes = emulator.memory.readBlock(addr, remLen);
-      renderDataRows(addr, bytes);
+      // Split remaining data into segments bounded by ADR targets
+      const sortedTargets = Array.from(dataStartAddresses)
+        .filter(a => a >= addr && a < endAddr)
+        .sort((a, b) => a - b);
+      if (sortedTargets[0] !== addr) sortedTargets.unshift(addr);
+      sortedTargets.push(endAddr);
+
+      for (let i = 0; i < sortedTargets.length - 1; i++) {
+        const segStart = sortedTargets[i];
+        const segLen = sortedTargets[i + 1] - segStart;
+        if (segLen > 0) {
+          renderDataRows(segStart, emulator.memory.readBlock(segStart, segLen));
+        }
+      }
       break;
     }
 
     const rawInstr = emulator.memory.read32(addr);
     const decoded = Decoder.decode(rawInstr);
 
-    // If we hit an UNKNOWN instruction that looks like printable ASCII text, render as data
-    if (decoded.type === InstructionType.UNKNOWN && isPrintableSlice(emulator.memory.readBlock(addr, Math.min(8, endAddr - addr)))) {
+    // If we hit an UNKNOWN instruction, render remaining bytes as data segments
+    if (decoded.type === InstructionType.UNKNOWN) {
       const remLen = endAddr - addr;
       const bytes = emulator.memory.readBlock(addr, remLen);
       renderDataRows(addr, bytes);
@@ -314,9 +331,26 @@ function isPrintableSlice(bytes) {
 }
 
 function renderDataRows(startAddr, bytes) {
-  const text = new TextDecoder().decode(bytes).replace(/\n/g, "\\n");
   const hexAddr = `0x${startAddr.toString(16).padStart(8, "0")}`;
   const previewHex = Array.from(bytes.slice(0, 4)).map(b => b.toString(16).padStart(2, "0")).join("");
+
+  let directiveText = "";
+  let commentText = "";
+
+  if (isPrintableSlice(bytes)) {
+    const text = new TextDecoder().decode(bytes).replace(/\n/g, "\\n");
+    directiveText = `.ascii "${escapeHtml(text)}"`;
+    commentText = `Embedded read-only string data (${bytes.length} bytes)`;
+  } else {
+    const words = [];
+    for (let i = 0; i + 4 <= Math.min(bytes.length, 16); i += 4) {
+      const w = ((bytes[i]) | (bytes[i + 1] << 8) | (bytes[i + 2] << 16) | (bytes[i + 3] << 24)) >>> 0;
+      words.push(`0x${w.toString(16).padStart(8, "0")}`);
+    }
+    const suffix = bytes.length > 16 ? ", …" : "";
+    directiveText = `.word ${words.join(", ")}${suffix}`;
+    commentText = `Embedded read-only 32-bit word table (${bytes.length} bytes / ${Math.floor(bytes.length / 4)} words)`;
+  }
 
   const tr = document.createElement("tr");
   tr.className = "disasm-row data-row";
@@ -324,10 +358,11 @@ function renderDataRows(startAddr, bytes) {
     <td class="disasm-bp-col"></td>
     <td class="disasm-addr">${hexAddr}</td>
     <td class="disasm-hex">${previewHex}…</td>
-    <td class="disasm-instr">.ascii "${escapeHtml(text)}"</td>
-    <td class="disasm-comment">Embedded read-only string data (${bytes.length} bytes)</td>
+    <td class="disasm-instr">${directiveText}</td>
+    <td class="disasm-comment">${commentText}</td>
   `;
   tr.addEventListener("click", () => {
+    switchMemoryTab("hexView");
     updateMemoryGrid(startAddr);
   });
   disasmTableBody.appendChild(tr);
@@ -405,6 +440,12 @@ function getInstructionAnnotation(decoded, addr = 0) {
     case InstructionType.STRW_IMM:
     case InstructionType.STRH_IMM:
     case InstructionType.STRB_IMM:
+      if (decoded.postIndex) {
+        return `Store ${regLabel(decoded.rt)} to [${regLabel(decoded.rn, true)}], then ${regLabel(decoded.rn, true)} += ${decoded.offsetBytes}`;
+      }
+      if (decoded.preIndex) {
+        return `${regLabel(decoded.rn, true)} += ${decoded.offsetBytes}, then store ${regLabel(decoded.rt)} to [${regLabel(decoded.rn, true)}]`;
+      }
       return decoded.isRegOffset
         ? `Store ${regLabel(decoded.rt)} to [${regLabel(decoded.rn, true)} + ${regLabel(decoded.rm)} << ${decoded.regShift}]`
         : `Store ${regLabel(decoded.rt)} to [${regLabel(decoded.rn, true)} + ${decoded.offsetBytes}]`;
@@ -415,6 +456,12 @@ function getInstructionAnnotation(decoded, addr = 0) {
     case InstructionType.LDRSH_IMM:
     case InstructionType.LDRB_IMM:
     case InstructionType.LDRSB_IMM:
+      if (decoded.postIndex) {
+        return `Load ${regLabel(decoded.rt)} from [${regLabel(decoded.rn, true)}], then ${regLabel(decoded.rn, true)} += ${decoded.offsetBytes}`;
+      }
+      if (decoded.preIndex) {
+        return `${regLabel(decoded.rn, true)} += ${decoded.offsetBytes}, then load ${regLabel(decoded.rt)} from [${regLabel(decoded.rn, true)}]`;
+      }
       return decoded.isRegOffset
         ? `Load ${regLabel(decoded.rt)} from [${regLabel(decoded.rn, true)} + ${regLabel(decoded.rm)} << ${decoded.regShift}]`
         : `Load ${regLabel(decoded.rt)} from [${regLabel(decoded.rn, true)} + ${decoded.offsetBytes}]`;
@@ -575,7 +622,32 @@ function updateTranslatedViews(buffer, name) {
   }
 }
 
-// 6. Level 1 MMIO Virtual Screen Renderer
+// 6. Level 1 MMIO Virtual Screen Renderer & Pixel Probe
+function isGraphicsBinary(filename = "") {
+  const f = filename.toLowerCase();
+  return f.includes("graphics") || f.includes("plasma") || f.includes("pattern") || f.includes("screen") || f.includes("framebuffer");
+}
+
+function switchMemoryTab(tabId) {
+  document.querySelectorAll(".mem-tab-btn").forEach(b => {
+    b.classList.toggle("active", b.dataset.memtab === tabId);
+  });
+  document.querySelectorAll(".mem-tab-content").forEach(c => {
+    c.style.display = c.id === tabId ? "block" : "none";
+  });
+  if (memToolbar) {
+    memToolbar.style.display = tabId === "hexView" ? "flex" : "none";
+  }
+  if (vramHeaderBadge) {
+    vramHeaderBadge.textContent =
+      tabId === "screenView" ? "320×240 RGBA" :
+      tabId === "stackView" ? "64-bit Frames" : "4 KB Pages";
+  }
+  if (tabId === "screenView") {
+    renderVramScreen(true);
+  }
+}
+
 function renderVramScreen(force = false) {
   if (!vramCtx || !vramImageData) return;
   if (!force && !emulator.isVramDirty()) return;
@@ -601,6 +673,21 @@ function renderVramScreen(force = false) {
     frameCounterInSec = 0;
     lastFpsTime = now;
   }
+}
+
+function instantRenderFrame() {
+  stopRunning();
+  if (emulator.cpu.halted) {
+    emulator.reset();
+  }
+  const t0 = performance.now();
+  emulator.run(2000000, false);
+  const elapsed = (performance.now() - t0).toFixed(1);
+  updateCPUState();
+  updateDisassemblyPointer();
+  updateMemoryGrid(currentMemAddr);
+  renderVramScreen(true);
+  appendTerminal(`[Screen] Instant frame rendered in ${elapsed} ms (${emulator.cycleCount.toLocaleString()} cycles).\n`);
 }
 
 function clearVramScreen() {
@@ -650,7 +737,7 @@ function startRunning() {
     function turboLoop() {
       if (!isRunning || emulator.cpu.halted) return;
       let lastRes = null;
-      const batchSize = 2500; // Efficient chunk size for graphics and math loops
+      const batchSize = 15000; // High-throughput chunk for smooth 60 FPS scanline sweeps
       for (let i = 0; i < batchSize; i++) {
         lastRes = emulator.step(false);
         if (lastRes.halted || lastRes.hitBreakpoint) {
@@ -757,15 +844,13 @@ function loadBinaryBuffer(buffer, filename, desc = "") {
   setStatus("READY", "READY", "status-ready");
   appendTerminal(`[Mini-QEMU] Loaded "${filename}" (${buffer.byteLength}B) -> Entry 0x${entry.toString(16).padStart(8, "0")}\n`);
 
-  const isGraphics = filename.includes("graphics") || filename.includes("plasma") || filename.includes("pattern") || filename.includes("screen") || filename.includes("framebuffer");
-  if (isGraphics) {
-    document.querySelectorAll(".mem-tab-btn").forEach(b => b.classList.remove("active"));
-    document.querySelectorAll(".mem-tab-content").forEach(c => { c.style.display = "none"; });
-    const screenTabBtn = document.querySelector('[data-memtab="screenView"]');
-    if (screenTabBtn) screenTabBtn.classList.add("active");
-    const screenView = document.getElementById("screenView");
-    if (screenView) screenView.style.display = "block";
-    renderVramScreen(true);
+  if (isGraphicsBinary(filename)) {
+    speedSlider.value = "5";
+    speedLabel.textContent = SPEED_LEVELS["5"].label;
+    switchMemoryTab("screenView");
+    if (runBenchBtn) runBenchBtn.textContent = "⚡ Benchmark 3 Frames";
+  } else {
+    if (runBenchBtn) runBenchBtn.textContent = "⚡ Benchmark 5,000 Runs";
   }
 }
 
@@ -797,7 +882,10 @@ async function loadBinariesList() {
 runBenchBtn.addEventListener("click", () => {
   if (!currentLoadedBuffer || !currentAotSource) return;
 
-  const ITERATIONS = 5000;
+  const isGfx = isGraphicsBinary(currentLoadedName);
+  const ITERATIONS = isGfx ? 3 : 5000;
+  const MAX_CYCLES = isGfx ? 2000000 : 2000;
+
   // Create executable JS function from lifted source
   const bodySource = currentAotSource.replace(/export\s+function\s+runNative\s*\(\)\s*\{/, "").replace(/\}\s*$/, "");
   const nativeFn = new Function(bodySource);
@@ -813,7 +901,7 @@ runBenchBtn.addEventListener("click", () => {
     benchEmu.cpu.reset();
     benchEmu.cpu.pc = benchEmu.entryPoint;
     benchEmu.cycleCount = 0;
-    interpRes = benchEmu.run(2000, false);
+    interpRes = benchEmu.run(MAX_CYCLES, false);
   }
   const interpMs = Math.max(0.05, performance.now() - t0);
 
@@ -843,16 +931,7 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
 
 document.querySelectorAll(".mem-tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
-    document.querySelectorAll(".mem-tab-btn").forEach(b => b.classList.remove("active"));
-    document.querySelectorAll(".mem-tab-content").forEach(c => { c.style.display = "none"; });
-    btn.classList.add("active");
-    const target = document.getElementById(btn.dataset.memtab);
-    if (target) {
-      target.style.display = "block";
-      if (btn.dataset.memtab === "screenView") {
-        renderVramScreen(true);
-      }
-    }
+    switchMemoryTab(btn.dataset.memtab);
   });
 });
 
@@ -922,21 +1001,20 @@ jumpStackBtn.addEventListener("click", () => updateMemoryGrid(Number(emulator.cp
 
 if (jumpVramBtn) {
   jumpVramBtn.addEventListener("click", () => {
-    // Switch to hex view and jump to VRAM base
-    document.querySelectorAll(".mem-tab-btn").forEach(b => b.classList.remove("active"));
-    document.querySelectorAll(".mem-tab-content").forEach(c => { c.style.display = "none"; });
-    const hexBtn = document.querySelector('[data-memtab="hexView"]');
-    if (hexBtn) hexBtn.classList.add("active");
-    const hexView = document.getElementById("hexView");
-    if (hexView) hexView.style.display = "block";
+    switchMemoryTab("hexView");
     updateMemoryGrid(0x00800000);
   });
 }
 
 if (jumpVramHexBtn) {
   jumpVramHexBtn.addEventListener("click", () => {
-    if (jumpVramBtn) jumpVramBtn.click();
+    switchMemoryTab("hexView");
+    updateMemoryGrid(0x00800000);
   });
+}
+
+if (instantRenderBtn) {
+  instantRenderBtn.addEventListener("click", instantRenderFrame);
 }
 
 if (clearScreenBtn) {
@@ -950,6 +1028,34 @@ if (crtScanlineToggle && scanlineOverlay) {
     } else {
       scanlineOverlay.classList.add("disabled");
     }
+  });
+}
+
+if (vramCanvas) {
+  const getCanvasPixelCoords = (e) => {
+    const rect = vramCanvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return { x: 0, y: 0 };
+    const x = Math.max(0, Math.min(FB_WIDTH - 1, Math.floor(((e.clientX - rect.left) / rect.width) * FB_WIDTH)));
+    const y = Math.max(0, Math.min(FB_HEIGHT - 1, Math.floor(((e.clientY - rect.top) / rect.height) * FB_HEIGHT)));
+    return { x, y };
+  };
+
+  vramCanvas.addEventListener("mousemove", (e) => {
+    const { x, y } = getCanvasPixelCoords(e);
+    const px = emulator.readVramPixel(x, y);
+    const addr = 0x00800000 + (y * FB_WIDTH + x) * 4;
+    const hexColor = `#${px.r.toString(16).padStart(2, "0")}${px.g.toString(16).padStart(2, "0")}${px.b.toString(16).padStart(2, "0")}`.toUpperCase();
+    if (pixelSwatch) pixelSwatch.style.background = hexColor;
+    if (pixelCoordText) pixelCoordText.textContent = `X: ${x}, Y: ${y}`;
+    if (pixelAddrText) pixelAddrText.textContent = `@ 0x${addr.toString(16).padStart(8, "0")}`;
+    if (pixelRgbaText) pixelRgbaText.textContent = `${hexColor} (${px.r},${px.g},${px.b})`;
+  });
+
+  vramCanvas.addEventListener("click", (e) => {
+    const { x, y } = getCanvasPixelCoords(e);
+    const addr = 0x00800000 + (y * FB_WIDTH + x) * 4;
+    switchMemoryTab("hexView");
+    updateMemoryGrid(addr);
   });
 }
 

@@ -203,10 +203,10 @@
       <div class="panel-header">
         <div class="tab-group">
           <button class="mem-tab-btn active" data-memtab="hexView">Memory Hex</button>
-          <button class="mem-tab-btn" data-memtab="stackView">Call Stack (SP)</button>
-          <button class="mem-tab-btn" data-memtab="screenView">📺 Display (VRAM)</button>
+          <button class="mem-tab-btn" data-memtab="stackView">Call Stack</button>
+          <button class="mem-tab-btn" data-memtab="screenView">📺 Display</button>
         </div>
-        <span class="header-info" id="vramHeaderBadge">320×240 Framebuffer</span>
+        <span class="header-info" id="vramHeaderBadge">4 KB Pages</span>
       </div>
 
       <!-- Address jumper & quick buttons -->
@@ -261,19 +261,26 @@
           <div class="screen-toolbar">
             <div class="screen-meta">
               <span class="screen-badge">320×240 RGBA</span>
-              <span class="screen-badge vram-addr">VRAM: 0x00800000</span>
+              <span class="screen-badge vram-addr" title="Memory-Mapped Framebuffer Range: 0x00800000 - 0x0084B000 (307.2 KB)">0x00800000</span>
             </div>
             <div class="screen-actions">
+              <button class="quick-jump-btn btn-instant-render" id="instantRenderBtn" title="Execute full frame immediately and blit to screen">⚡ Instant</button>
               <label class="crt-toggle-label" title="Toggle CRT scanline raster effect">
-                <input type="checkbox" id="crtScanlineToggle" checked> Scanlines
+                <input type="checkbox" id="crtScanlineToggle" checked> CRT
               </label>
               <button class="quick-jump-btn" id="jumpVramHexBtn" title="Inspect VRAM in Hex View">Hex</button>
               <button class="quick-jump-btn" id="clearScreenBtn" title="Clear Screen Buffer">Clear</button>
             </div>
           </div>
-          <div class="canvas-wrapper">
+          <div class="canvas-wrapper" title="Hover to inspect pixel MMIO address &amp; color • Click pixel to jump to Hex View">
             <canvas id="vramCanvas" width="320" height="240"></canvas>
             <div class="scanline-overlay" id="scanlineOverlay"></div>
+          </div>
+          <div class="pixel-inspector-bar" id="pixelInspectorBar">
+            <span class="pixel-swatch" id="pixelSwatch" style="background: #000000;"></span>
+            <span class="mono" id="pixelCoordText">X: —, Y: —</span>
+            <span class="mono pixel-addr" id="pixelAddrText">@ 0x00800000</span>
+            <span class="mono pixel-rgba" id="pixelRgbaText">#000000</span>
           </div>
           <div class="screen-footer">
             <span>Frames: <span id="vramFrameCount" class="mono">0</span></span>

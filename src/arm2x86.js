@@ -47,12 +47,20 @@ export class Arm2X86Translator {
     // 1. Disassemble the entire executable code segment (.text)
     const codeSeg = (this.memory.segments || []).find(s => (s.flags & 1) !== 0);
     const endPC = codeSeg ? (codeSeg.vaddr + codeSeg.filesz) : (pc + 128);
+    const dataStartAddresses = new Set();
 
     while (pc + 4 <= endPC) {
+      if (dataStartAddresses.has(pc)) break;
       const raw = this.memory.read32(pc);
       if (raw === 0) break; // Stop at zero-padding or non-code data
       const decoded = Decoder.decode(raw);
       if (decoded.type === InstructionType.UNKNOWN) break;
+      if (decoded.type === InstructionType.ADR) {
+        const target = pc + decoded.offsetBytes;
+        if (target > pc && target < endPC) {
+          dataStartAddresses.add(target);
+        }
+      }
       armInstructions.push({ pc, raw, decoded });
       pc += 4;
       if (!codeSeg && decoded.type === InstructionType.SVC) break;
@@ -292,6 +300,78 @@ export class Arm2X86Translator {
           break;
         }
 
+        case InstructionType.AND_REG: {
+          const rd = this.reg(decoded.rd);
+          const rn = this.reg(decoded.rn);
+          const rm = this.reg(decoded.rm);
+          const dst = X86_REG_INDEX[rd] ?? 0;
+          const src = X86_REG_INDEX[rm] ?? 0;
+          if (rd === rn) {
+            x86Asm = `and ${rd}, ${rm}`;
+            x86Bytes = [0x48, 0x21, 0xc0 + (src << 3) + dst];
+          } else {
+            const base = X86_REG_INDEX[rn] ?? 0;
+            x86Asm = `mov ${rd}, ${rn} ; and ${rd}, ${rm}`;
+            x86Bytes = [0x48, 0x89, 0xc0 + (base << 3) + dst, 0x48, 0x21, 0xc0 + (src << 3) + dst];
+          }
+          break;
+        }
+
+        case InstructionType.MVN_REG: {
+          const rd = this.reg(decoded.rd);
+          const rm = this.reg(decoded.rm);
+          const dst = X86_REG_INDEX[rd] ?? 0;
+          x86Asm = rd === rm ? `not ${rd}` : `mov ${rd}, ${rm} ; not ${rd}`;
+          x86Bytes = [0x48, 0xf7, 0xd0 + dst];
+          break;
+        }
+
+        case InstructionType.LSL:
+        case InstructionType.LSR:
+        case InstructionType.ASR: {
+          const rd = this.reg(decoded.rd);
+          const rn = this.reg(decoded.rn);
+          const rm = this.reg(decoded.rm);
+          const shiftOp = decoded.type === InstructionType.LSL ? "shl" : (decoded.type === InstructionType.LSR ? "shr" : "sar");
+          x86Asm = `mov ${rd}, ${rn} ; mov rcx, ${rm} ; ${shiftOp} ${rd}, cl`;
+          x86Bytes = [0x48, 0xd3, 0xe0];
+          break;
+        }
+
+        case InstructionType.UBFM: {
+          const rd = this.reg(decoded.rd);
+          const rn = this.reg(decoded.rn);
+          const dst = X86_REG_INDEX[rd] ?? 0;
+          const bits = decoded.sf === 0 ? 32 : 64;
+          const maxBit = bits - 1;
+          if (decoded.imms !== maxBit && decoded.imms + 1 === decoded.immr) {
+            const shift = bits - decoded.immr;
+            x86Asm = rd === rn ? `shl ${rd}, ${shift}` : `mov ${rd}, ${rn} ; shl ${rd}, ${shift}`;
+            x86Bytes = [0x48, 0xc1, 0xe0 + dst, shift & 0xff];
+          } else if (decoded.immr === 0 && decoded.imms === 7) {
+            x86Asm = rd === rn ? `and ${rd}, 0xff` : `movzx ${rd}, byte ${rn}`;
+            x86Bytes = [0x48, 0x81, 0xe0 + dst, 0xff, 0x00, 0x00, 0x00];
+          } else if (decoded.immr === 0 && decoded.imms === 15) {
+            x86Asm = rd === rn ? `and ${rd}, 0xffff` : `movzx ${rd}, word ${rn}`;
+            x86Bytes = [0x48, 0x81, 0xe0 + dst, 0xff, 0xff, 0x00, 0x00];
+          } else {
+            const width = Math.max(1, decoded.imms - decoded.immr + 1);
+            const mask = (1n << BigInt(width)) - 1n;
+            x86Asm = `mov ${rd}, ${rn} ; shr ${rd}, ${decoded.immr} ; and ${rd}, 0x${mask.toString(16)}`;
+            x86Bytes = [0x48, 0xc1, 0xe8 + dst, decoded.immr & 0xff];
+          }
+          break;
+        }
+
+        case InstructionType.SBFM: {
+          const rd = this.reg(decoded.rd);
+          const rn = this.reg(decoded.rn);
+          const dst = X86_REG_INDEX[rd] ?? 0;
+          x86Asm = `movsx ${rd}, ${rn}`;
+          x86Bytes = [0x48, 0x63, 0xc0 + dst];
+          break;
+        }
+
         case InstructionType.STP: {
           const rt1 = this.reg(decoded.rt1);
           const rt2 = this.reg(decoded.rt2);
@@ -322,20 +402,59 @@ export class Arm2X86Translator {
           break;
         }
 
-        case InstructionType.STR_IMM: {
+        case InstructionType.STR_IMM:
+        case InstructionType.STRW_IMM:
+        case InstructionType.STRH_IMM:
+        case InstructionType.STRB_IMM: {
           const rt = this.reg(decoded.rt);
           const rn = this.reg(decoded.rn);
-          const off = decoded.offsetBytes ? `+${decoded.offsetBytes}` : "";
-          x86Asm = `mov [${rn}${off}], ${rt}`;
+          const sizeSpec = decoded.type === InstructionType.STRW_IMM ? "dword " :
+                           decoded.type === InstructionType.STRH_IMM ? "word " :
+                           decoded.type === InstructionType.STRB_IMM ? "byte " : "";
+          if (decoded.postIndex) {
+            const sign = decoded.offsetBytes >= 0 ? "add" : "sub";
+            x86Asm = `mov ${sizeSpec}[${rn}], ${rt} ; ${sign} ${rn}, ${Math.abs(decoded.offsetBytes)}`;
+          } else if (decoded.preIndex) {
+            const sign = decoded.offsetBytes >= 0 ? "add" : "sub";
+            x86Asm = `${sign} ${rn}, ${Math.abs(decoded.offsetBytes)} ; mov ${sizeSpec}[${rn}], ${rt}`;
+          } else if (decoded.isRegOffset) {
+            const rm = this.reg(decoded.rm);
+            const scale = decoded.regShift ? `*${1 << decoded.regShift}` : "";
+            x86Asm = `mov ${sizeSpec}[${rn} + ${rm}${scale}], ${rt}`;
+          } else {
+            const off = decoded.offsetBytes ? (decoded.offsetBytes > 0 ? `+${decoded.offsetBytes}` : `${decoded.offsetBytes}`) : "";
+            x86Asm = `mov ${sizeSpec}[${rn}${off}], ${rt}`;
+          }
           x86Bytes = [0x48, 0x89, 0x04, 0x24];
           break;
         }
 
-        case InstructionType.LDR_IMM: {
+        case InstructionType.LDR_IMM:
+        case InstructionType.LDRW_IMM:
+        case InstructionType.LDRSW_IMM:
+        case InstructionType.LDRH_IMM:
+        case InstructionType.LDRSH_IMM:
+        case InstructionType.LDRB_IMM:
+        case InstructionType.LDRSB_IMM: {
           const rt = this.reg(decoded.rt);
           const rn = this.reg(decoded.rn);
-          const off = decoded.offsetBytes ? `+${decoded.offsetBytes}` : "";
-          x86Asm = `mov ${rt}, [${rn}${off}]`;
+          const sizeSpec = (decoded.type === InstructionType.LDRW_IMM || decoded.type === InstructionType.LDRSW_IMM) ? "dword " :
+                           (decoded.type === InstructionType.LDRH_IMM || decoded.type === InstructionType.LDRSH_IMM) ? "word " :
+                           (decoded.type === InstructionType.LDRB_IMM || decoded.type === InstructionType.LDRSB_IMM) ? "byte " : "";
+          if (decoded.postIndex) {
+            const sign = decoded.offsetBytes >= 0 ? "add" : "sub";
+            x86Asm = `mov ${rt}, ${sizeSpec}[${rn}] ; ${sign} ${rn}, ${Math.abs(decoded.offsetBytes)}`;
+          } else if (decoded.preIndex) {
+            const sign = decoded.offsetBytes >= 0 ? "add" : "sub";
+            x86Asm = `${sign} ${rn}, ${Math.abs(decoded.offsetBytes)} ; mov ${rt}, ${sizeSpec}[${rn}]`;
+          } else if (decoded.isRegOffset) {
+            const rm = this.reg(decoded.rm);
+            const scale = decoded.regShift ? `*${1 << decoded.regShift}` : "";
+            x86Asm = `mov ${rt}, ${sizeSpec}[${rn} + ${rm}${scale}]`;
+          } else {
+            const off = decoded.offsetBytes ? (decoded.offsetBytes > 0 ? `+${decoded.offsetBytes}` : `${decoded.offsetBytes}`) : "";
+            x86Asm = `mov ${rt}, ${sizeSpec}[${rn}${off}]`;
+          }
           x86Bytes = [0x48, 0x8b, 0x04, 0x24];
           break;
         }

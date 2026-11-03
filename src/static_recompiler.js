@@ -24,11 +24,19 @@ export class StaticRecompiler {
     const endPC = codeSeg ? (codeSeg.vaddr + codeSeg.filesz) : (pc + 256);
 
     // 1. Disassemble code segment (stopping at embedded data / unknown opcodes)
+    const dataStartAddresses = new Set();
     while (pc + 4 <= endPC) {
+      if (dataStartAddresses.has(pc)) break;
       const raw = this.memory.read32(pc);
       if (raw === 0) break;
       const decoded = Decoder.decode(raw);
       if (decoded.type === InstructionType.UNKNOWN) break;
+      if (decoded.type === InstructionType.ADR) {
+        const target = pc + decoded.offsetBytes;
+        if (target > pc && target < endPC) {
+          dataStartAddresses.add(target);
+        }
+      }
       instructions.push({ pc, raw, decoded });
       pc += 4;
       if (!codeSeg && decoded.type === InstructionType.SVC) break;
@@ -50,14 +58,14 @@ export class StaticRecompiler {
     lines.push("  let flagN = false;");
     lines.push("");
 
-    // Identify branch targets (labels) and backward loop ranges (targetPC -> branchPC)
-    const loopStarts = new Set();
+    // Identify branch targets (labels) and backward loop ranges (targetPC -> count)
+    const loopStarts = new Map();
     const funcTargets = new Set();
     for (const inst of instructions) {
       if (inst.decoded.type === InstructionType.B_COND || inst.decoded.type === InstructionType.B) {
         const targetPC = inst.pc + inst.decoded.offsetBytes;
         if (targetPC <= inst.pc) {
-          loopStarts.add(targetPC);
+          loopStarts.set(targetPC, (loopStarts.get(targetPC) || 0) + 1);
         }
       } else if (inst.decoded.type === InstructionType.BL) {
         funcTargets.add(inst.pc + inst.decoded.offsetBytes);
@@ -68,21 +76,28 @@ export class StaticRecompiler {
     const spOrReg = (r) => (r === 31 ? "sp" : `x[${r}]`);
 
     // Generate structured JS code directly from the decoded ARM64 instructions
-    let indent = "  ";
+    let indentLevel = 1;
+    const getIndent = () => "  ".repeat(indentLevel);
+
     for (const inst of instructions) {
       const { pc, decoded } = inst;
       const hexPC = `0x${pc.toString(16).padStart(8, "0")}`;
 
       if (funcTargets.has(pc)) {
         lines.push("");
-        lines.push(`${indent}// --- Subroutine entry at ${hexPC} ---`);
+        lines.push(`${getIndent()}// --- Subroutine entry at ${hexPC} ---`);
       }
 
       if (loopStarts.has(pc)) {
-        lines.push(`${indent}// Reconstructed backward-branch loop at ${hexPC}`);
-        lines.push(`${indent}do {`);
-        indent = "    ";
+        const count = loopStarts.get(pc);
+        for (let c = 0; c < count; c++) {
+          lines.push(`${getIndent()}// Reconstructed backward-branch loop at ${hexPC}`);
+          lines.push(`${getIndent()}do {`);
+          indentLevel++;
+        }
       }
+
+      const indent = getIndent();
 
       switch (decoded.type) {
         case InstructionType.MOVZ:
@@ -137,6 +152,43 @@ export class StaticRecompiler {
           lines.push(`${indent}x[${decoded.rd}] = ${regExpr(decoded.rm)} === 0n ? 0n : (${regExpr(decoded.rn)} / ${regExpr(decoded.rm)}); // ${decoded.disassembly}`);
           break;
 
+        case InstructionType.LSL:
+          lines.push(`${indent}x[${decoded.rd}] = BigInt.asUintN(${decoded.sf === 0 ? 32 : 64}, ${regExpr(decoded.rn)} << (${regExpr(decoded.rm)} & ${decoded.sf === 0 ? 31 : 63}n)); // ${decoded.disassembly}`);
+          break;
+
+        case InstructionType.LSR:
+          lines.push(`${indent}x[${decoded.rd}] = BigInt.asUintN(${decoded.sf === 0 ? 32 : 64}, ${regExpr(decoded.rn)}) >> (${regExpr(decoded.rm)} & ${decoded.sf === 0 ? 31 : 63}n); // ${decoded.disassembly}`);
+          break;
+
+        case InstructionType.ASR:
+          lines.push(`${indent}x[${decoded.rd}] = BigInt.asUintN(${decoded.sf === 0 ? 32 : 64}, BigInt.asIntN(${decoded.sf === 0 ? 32 : 64}, ${regExpr(decoded.rn)}) >> (${regExpr(decoded.rm)} & ${decoded.sf === 0 ? 31 : 63}n)); // ${decoded.disassembly}`);
+          break;
+
+        case InstructionType.UBFM: {
+          const bits = decoded.sf === 0 ? 32 : 64;
+          const maxBit = bits - 1;
+          if (decoded.imms !== maxBit && decoded.imms + 1 === decoded.immr) {
+            const shift = bits - decoded.immr;
+            lines.push(`${indent}x[${decoded.rd}] = BigInt.asUintN(${bits}, ${regExpr(decoded.rn)} << ${shift}n); // ${decoded.disassembly}`);
+          } else if (decoded.imms >= decoded.immr) {
+            const width = decoded.imms - decoded.immr + 1;
+            const mask = (1n << BigInt(width)) - 1n;
+            const shifted = decoded.immr > 0 ? `(${regExpr(decoded.rn)} >> ${decoded.immr}n)` : regExpr(decoded.rn);
+            lines.push(`${indent}x[${decoded.rd}] = ${shifted} & 0x${mask.toString(16)}n; // ${decoded.disassembly}`);
+          } else {
+            lines.push(`${indent}x[${decoded.rd}] = BigInt.asUintN(${bits}, ${regExpr(decoded.rn)}); // ${decoded.disassembly}`);
+          }
+          break;
+        }
+
+        case InstructionType.SBFM: {
+          const bits = decoded.sf === 0 ? 32 : 64;
+          const width = Math.max(1, decoded.imms - decoded.immr + 1);
+          const shifted = decoded.immr > 0 ? `(${regExpr(decoded.rn)} >> ${decoded.immr}n)` : regExpr(decoded.rn);
+          lines.push(`${indent}x[${decoded.rd}] = BigInt.asUintN(${bits}, BigInt.asIntN(${width}, ${shifted})); // ${decoded.disassembly}`);
+          break;
+        }
+
         case InstructionType.AND_REG:
           lines.push(`${indent}x[${decoded.rd}] = ${regExpr(decoded.rn)} & ${regExpr(decoded.rm)}; // ${decoded.disassembly}`);
           break;
@@ -187,7 +239,12 @@ export class StaticRecompiler {
         case InstructionType.STRB_IMM:
         case InstructionType.LDRB_IMM:
         case InstructionType.LDRSB_IMM:
-          lines.push(`${indent}/* Memory/Stack op (${hexPC}): ${decoded.disassembly} */`);
+          if ((decoded.preIndex || decoded.postIndex) && decoded.offsetBytes) {
+            const sign = decoded.offsetBytes >= 0 ? "+" : "-";
+            lines.push(`${indent}${spOrReg(decoded.rn)} = ${spOrReg(decoded.rn)} ${sign} ${Math.abs(decoded.offsetBytes)}n; // ${decoded.disassembly} (${hexPC})`);
+          } else {
+            lines.push(`${indent}/* Memory/Stack op (${hexPC}): ${decoded.disassembly} */`);
+          }
           break;
 
         case InstructionType.CSEL: {
@@ -218,9 +275,9 @@ export class StaticRecompiler {
 
           // Backwards branch: close the reconstructed do-while loop
           if (targetPC <= pc) {
-            indent = "  ";
+            indentLevel = Math.max(1, indentLevel - 1);
             const condExpr = decoded.cond === ConditionCode.NE ? "!flagZ" : "flagZ";
-            lines.push(`${indent}} while (${condExpr}); // ${decoded.disassembly} -> ${targetHex}`);
+            lines.push(`${getIndent()}} while (${condExpr}); // ${decoded.disassembly} -> ${targetHex}`);
           } else {
             lines.push(`${indent}// Conditional forward jump: ${decoded.disassembly} -> ${targetHex}`);
           }
@@ -231,8 +288,8 @@ export class StaticRecompiler {
           const targetPC = pc + decoded.offsetBytes;
           const targetHex = `0x${targetPC.toString(16).padStart(8, "0")}`;
           if (targetPC <= pc && loopStarts.has(targetPC)) {
-            indent = "  ";
-            lines.push(`${indent}} while (!flagZ); // ${decoded.disassembly} -> ${targetHex}`);
+            indentLevel = Math.max(1, indentLevel - 1);
+            lines.push(`${getIndent()}} while (!flagZ); // ${decoded.disassembly} -> ${targetHex}`);
           } else {
             lines.push(`${indent}// Jump: ${decoded.disassembly} -> ${targetHex}`);
           }

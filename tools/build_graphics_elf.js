@@ -87,8 +87,8 @@ export function generatePatternElf() {
     0xd2800000 | (0 << 5) | 3,
 
     // <bar_loop>: offset 0x0c (instruction index 3)
-    // 0x0c: adr  x5, #bar_colors_table (offset to table at 0x84: (0x84 - 0x0c) = 120B -> +30 instructions)
-    0x10000000 | (30 << 5) | 5,
+    // 0x0c: adr  x5, #bar_colors_table (offset to table at 0xa0: (0xa0 - 0x0c) = 148B -> +37 instructions)
+    0x10000000 | (37 << 5) | 5,
     // 0x10: ldr  w2, [x5, x3, lsl #2] (w2 = color from table)
     0xb86378a2,
     // 0x14: movz x4, #40               (x4 = 40 pixels per bar)
@@ -160,11 +160,27 @@ export function generatePatternElf() {
     // 0x7c: b.ne 0x3c                  (-16 instructions -> imm19 = -16)
     0x54000000 | (((-16) & 0x7ffff) << 5) | 1,
 
-    // --- Jump over Bar Colors Table ---
-    // 0x80: b  #after_table            (jump over 8 table words: +9 instructions -> to 0xa4)
-    0x14000000 | (9 & 0x3ffffff),
+    // --- Output Message via sys_write ---
+    // 0x80: movz x0, #1                (fd = 1 stdout)
+    0xd2800020,
+    // 0x84: adr  x1, #msg              (offset to msg at 0xc0: (0xc0 - 0x84) = 60B = +15 instructions)
+    0x10000000 | (15 << 5) | 1,
+    // 0x88: movz x2, #len              (msg length)
+    0xd2800000 | (msgBuffer.length << 5) | 2,
+    // 0x8c: movz x8, #64               (syscall 64: sys_write)
+    0xd2800808,
+    // 0x90: svc  #0                    (trap to host)
+    0xd4000001,
 
-    // --- Table of 8 Bar Colors at 0x84 (8 words = 32 bytes) ---
+    // --- Exit via sys_exit(0) ---
+    // 0x94: movz x0, #0                (code 0)
+    0xd2800000,
+    // 0x98: movz x8, #93               (syscall 93: sys_exit)
+    0xd2800ba8,
+    // 0x9c: svc  #0                    (exit)
+    0xd4000001,
+
+    // --- Read-Only Data: Table of 8 Bar Colors at 0xa0 (8 words = 32 bytes, 0xa0..0xbf) ---
     0xffffffff, // Bar 0: White
     0xff00ffff, // Bar 1: Yellow
     0xffffff00, // Bar 2: Cyan
@@ -173,26 +189,6 @@ export function generatePatternElf() {
     0xff0000ff, // Bar 5: Red
     0xffff0000, // Bar 6: Blue
     0xff1a1a1a, // Bar 7: Dark Gray / Black
-
-    // <after_table>: offset 0xa4
-    // 0xa4: movz x0, #1                (fd = 1 stdout)
-    0xd2800020,
-    // 0xa8: adr  x1, #msg              (offset to msg at 0xc4: (0xc4 - 0xa8) = 28B = +7 instructions)
-    0x100000e1,
-    // 0xac: movz x2, #len              (msg length)
-    0xd2800000 | (msgBuffer.length << 5) | 2,
-    // 0xb0: movz x8, #64               (syscall 64: sys_write)
-    0xd2800808,
-    // 0xb4: svc  #0                    (trap to host)
-    0xd4000001,
-
-    // --- Exit via sys_exit(0) ---
-    // 0xb8: movz x0, #0                (code 0)
-    0xd2800000,
-    // 0xbc: movz x8, #93               (syscall 93: sys_exit)
-    0xd2800ba8,
-    // 0xc0: svc  #0                    (exit)
-    0xd4000001,
   ];
 
   return buildElfWithPayload(instructions, msgBuffer);

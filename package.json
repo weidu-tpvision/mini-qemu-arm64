@@ -6,6 +6,7 @@
   "scripts": {
     "test": "node tests/test_decoder.js && node tests/test_ui_api.js && node tests/test_server.js && node tests/test_syscalls.js && node tests/test_abi_and_compiler.js && node tests/test_graphics.js",
     "ui": "node tools/server.js",
+    "serve": "node tools/server.js",
     "start": "node src/emulator.js bin/fib.elf",
     "recompile": "node src/static_recompiler.js",
     "translate": "node src/arm2x86.js bin/fib.elf",

@@ -273,39 +273,43 @@
     </g>
   </g>
 
-  <!-- ================= PANEL 4: MEMORY HEX INSPECTOR & STACK ================= -->
+  <!-- ================= PANEL 4: MEMORY HEX INSPECTOR, STACK & DISPLAY ================= -->
   <g transform="translate(905, 72)" filter="url(#shadow)">
     <rect width="360" height="694" class="panel"/>
     <path d="M0 8 Q0 0 8 0 L352 0 Q360 0 360 8 L360 34 L0 34 Z" class="panel-hdr"/>
     
-    <!-- Memory / Stack Tabs -->
-    <rect x="8" y="5" width="90" height="24" rx="5" fill="#0f1523" stroke="#243048"/>
-    <text x="16" y="21" fill="#06b6d4" font-size="10.5" font-weight="bold">Memory Hex</text>
-    <text x="108" y="21" fill="#64748b" font-size="10.5" font-weight="bold">Call Stack (SP)</text>
-    <text x="285" y="21" fill="#64748b" font-size="10" class="mono">4 KB Pages</text>
+    <!-- Memory / Stack / Display Tabs -->
+    <rect x="8" y="5" width="82" height="24" rx="5" fill="#0f1523" stroke="#243048"/>
+    <text x="14" y="21" fill="#06b6d4" font-size="10" font-weight="bold">Memory Hex</text>
+    <text x="98" y="21" fill="#64748b" font-size="10" font-weight="bold">Call Stack</text>
+    <text x="165" y="21" fill="#38bdf8" font-size="10" font-weight="bold">📺 Display</text>
+    <text x="275" y="21" fill="#64748b" font-size="9.5" class="mono">320×240 VRAM</text>
 
     <!-- Address jumper toolbar -->
     <rect x="8" y="40" width="344" height="32" fill="#0f1523" stroke="#243048" stroke-width="1" rx="6"/>
-    <rect x="14" y="44" width="88" height="24" fill="#161f33" stroke="#243048" rx="4"/>
-    <text x="20" y="60" fill="#f1f5f9" font-size="11" class="mono">0x00400000</text>
+    <rect x="14" y="44" width="82" height="24" fill="#161f33" stroke="#243048" rx="4"/>
+    <text x="19" y="60" fill="#f1f5f9" font-size="10.5" class="mono">0x00800000</text>
     
-    <rect x="106" y="44" width="28" height="24" fill="#161f33" stroke="#243048" rx="4"/>
-    <text x="113" y="60" fill="#94a3b8" font-size="10" font-weight="bold">Go</text>
+    <rect x="100" y="44" width="26" height="24" fill="#161f33" stroke="#243048" rx="4"/>
+    <text x="106" y="60" fill="#94a3b8" font-size="10" font-weight="bold">Go</text>
 
-    <rect x="138" y="44" width="22" height="24" fill="#161f33" stroke="#243048" rx="4"/>
-    <text x="144" y="60" fill="#94a3b8" font-size="9">▲</text>
+    <rect x="130" y="44" width="20" height="24" fill="#161f33" stroke="#243048" rx="4"/>
+    <text x="135" y="60" fill="#94a3b8" font-size="9">▲</text>
 
-    <rect x="164" y="44" width="22" height="24" fill="#161f33" stroke="#243048" rx="4"/>
-    <text x="170" y="60" fill="#94a3b8" font-size="9">▼</text>
+    <rect x="154" y="44" width="20" height="24" fill="#161f33" stroke="#243048" rx="4"/>
+    <text x="159" y="60" fill="#94a3b8" font-size="9">▼</text>
 
-    <rect x="206" y="44" width="42" height="24" fill="#161f33" stroke="#243048" rx="4"/>
-    <text x="214" y="60" fill="#94a3b8" font-size="10">.text</text>
+    <rect x="180" y="44" width="38" height="24" fill="#161f33" stroke="#243048" rx="4"/>
+    <text x="186" y="60" fill="#94a3b8" font-size="9.5">.text</text>
 
-    <rect x="252" y="44" width="42" height="24" fill="#161f33" stroke="#243048" rx="4"/>
-    <text x="260" y="60" fill="#94a3b8" font-size="10">RAM</text>
+    <rect x="222" y="44" width="38" height="24" fill="#161f33" stroke="#243048" rx="4"/>
+    <text x="229" y="60" fill="#94a3b8" font-size="9.5">RAM</text>
 
-    <rect x="298" y="44" width="46" height="24" fill="#161f33" stroke="#243048" rx="4"/>
-    <text x="312" y="60" fill="#94a3b8" font-size="10">SP</text>
+    <rect x="264" y="44" width="34" height="24" fill="#161f33" stroke="#243048" rx="4"/>
+    <text x="274" y="60" fill="#94a3b8" font-size="9.5">SP</text>
+
+    <rect x="302" y="44" width="44" height="24" fill="#161f33" stroke="#06b6d4" rx="4"/>
+    <text x="308" y="60" fill="#38bdf8" font-size="9.5" font-weight="bold">VRAM</text>
 
     <!-- Hex Table Header -->
     <rect x="0" y="80" width="360" height="24" fill="#161f33"/>
@@ -348,6 +352,24 @@
       <text x="12" y="307" fill="#10b981" font-weight="bold">0x006ffff0</text>
       <text x="90" y="307" fill="#f1f5f9">0x0000000000700000</text>
       <text x="265" y="307" fill="#10b981" font-weight="bold">← SP / FP</text>
+
+      <!-- Level 1 MMIO Virtual Screen Preview Section -->
+      <rect x="0" y="328" width="360" height="24" fill="#161f33"/>
+      <text x="12" y="344" fill="#38bdf8" font-size="9.5" font-weight="bold">📺 LEVEL 1 MMIO FRAMEBUFFER (0x00800000 • 320×240)</text>
+
+      <!-- Mini SMPTE Color Bars Preview -->
+      <g transform="translate(20, 362)">
+        <rect x="0" y="0" width="40" height="140" fill="#ffffff"/>
+        <rect x="40" y="0" width="40" height="140" fill="#ffff00"/>
+        <rect x="80" y="0" width="40" height="140" fill="#00ffff"/>
+        <rect x="120" y="0" width="40" height="140" fill="#00ff00"/>
+        <rect x="160" y="0" width="40" height="140" fill="#ff00ff"/>
+        <rect x="200" y="0" width="40" height="140" fill="#ff0000"/>
+        <rect x="240" y="0" width="40" height="140" fill="#0000ff"/>
+        <rect x="280" y="0" width="40" height="140" fill="#1a1a1a"/>
+        <rect x="0" y="0" width="320" height="140" fill="none" stroke="#243048" stroke-width="2" rx="4"/>
+      </g>
+      <text x="20" y="520" fill="#94a3b8" font-size="9.5">Hover: (140, 40) → 0x0080C88C • RGBA(0, 255, 0, 255) #00FF00</text>
     </g>
   </g>
 </svg>
