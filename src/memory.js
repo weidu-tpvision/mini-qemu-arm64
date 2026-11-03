@@ -200,11 +200,26 @@ export class Memory {
   // Deallocate a range of virtual addresses (used by sys_munmap and sys_brk shrink)
   freeRange(startAddr, length) {
     const start = Number(startAddr);
-    const end = start + Number(length);
-    const firstPage = Math.floor(start / PAGE_SIZE);
+    const len = Number(length);
+    if (len <= 0) return 0;
+    const end = start + len;
+
+    // 1. If start is mid-page, zero out the freed sub-page slice without deleting the active lower part of the page
+    const startOffset = start & PAGE_MASK;
+    if (startOffset !== 0) {
+      const firstPageIdx = Math.floor(start / PAGE_SIZE);
+      const page = this.pages.get(firstPageIdx);
+      if (page) {
+        const clearEnd = Math.min(PAGE_SIZE, startOffset + len);
+        page.fill(0, startOffset, clearEnd);
+      }
+    }
+
+    // 2. Delete all fully reclaimed 4 KB pages in [ceil(start / PAGE_SIZE), floor((end - 1) / PAGE_SIZE)]
+    const firstFullPage = Math.ceil(start / PAGE_SIZE);
     const lastPage = Math.floor((end - 1) / PAGE_SIZE);
     let freedCount = 0;
-    for (let p = firstPage; p <= lastPage; p++) {
+    for (let p = firstFullPage; p <= lastPage; p++) {
       if (this.pages.delete(p)) {
         freedCount++;
       }

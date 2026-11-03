@@ -160,8 +160,8 @@ export class MiniQEMU {
     this.entryPoint = entryPoint;
     this.cpu.pc = entryPoint;
 
-    // Calculate initial program break (brk) just past highest loaded segment, page-aligned
-    let maxAddr = 0x00400000n;
+    // Calculate initial program break (brk) at 0x00500000 (or past highest loaded segment, page-aligned)
+    let maxAddr = 0x00500000n;
     if (this.memory.segments && this.memory.segments.length > 0) {
       for (const seg of this.memory.segments) {
         const segEnd = BigInt(seg.vaddr + Math.max(seg.filesz, seg.memsz));
@@ -1320,8 +1320,9 @@ export class MiniQEMU {
       const isAllocated = (header & 1n) !== 0n;
       const chunkSize = Number(header & ~1n);
 
-      if (chunkSize < 8 || chunkSize > Math.max(4096, brk - addr + 4096)) {
-        // Non-standard or raw unformatted heap memory
+      // A valid boundary-tag chunk must be >= 16 bytes, 8-byte aligned, and fit within [addr, brk]
+      if (chunkSize < 16 || (chunkSize & 7) !== 0 || (addr + chunkSize) > brk) {
+        // Non-standard or raw bump-allocated heap memory (e.g. heap_demo.elf)
         const remSize = brk - addr;
         chunks.push({
           addr,

@@ -72,6 +72,7 @@ const heapBrkVal = document.getElementById("heapBrkVal");
 const heapAllocVal = document.getElementById("heapAllocVal");
 const heapFreeVal = document.getElementById("heapFreeVal");
 const heapPagesVal = document.getElementById("heapPagesVal");
+const heapMapTitle = document.getElementById("heapMapTitle");
 const heapVisualStrip = document.getElementById("heapVisualStrip");
 const heapTableBody = document.getElementById("heapTableBody");
 
@@ -695,19 +696,34 @@ function updateHeapView() {
   heapAllocVal.textContent = `${stats.allocatedBytes.toLocaleString()} B (${stats.allocatedCount} chunks)`;
   heapFreeVal.textContent = `${stats.freeBytes.toLocaleString()} B (${stats.freeCount} holes)`;
   heapPagesVal.textContent = `${stats.pageCount} (${Math.round(stats.mappedBytes / 1024)} KB)`;
+  if (heapMapTitle) {
+    heapMapTitle.textContent = `VISUAL HEAP MAP (0x${stats.heapStart.toString(16).padStart(8, "0")} → 0x${stats.brk.toString(16).padStart(8, "0")} • ${stats.heapSize} B)`;
+  }
+
+  const allItems = [
+    ...stats.chunks,
+    ...(stats.mmapRegions || []).map(r => ({
+      addr: r.addr,
+      size: r.len,
+      payloadSize: r.len,
+      payloadAddr: r.addr,
+      isAllocated: true,
+      isMmap: true
+    }))
+  ];
 
   if (heapVisualStrip) {
     heapVisualStrip.innerHTML = "";
-    if (stats.chunks.length === 0) {
+    if (allItems.length === 0) {
       heapVisualStrip.innerHTML = `<span style="color: var(--text-muted); font-size: 11px; align-self: center; margin: auto;">No heap allocations yet (brk = 0x${stats.heapStart.toString(16)}). Run program to allocate memory.</span>`;
     } else {
-      stats.chunks.forEach(c => {
+      allItems.forEach(c => {
         const box = document.createElement("div");
         const isAlloc = c.isAllocated;
         box.className = `heap-chunk-box ${isAlloc ? "heap-chunk-alloc" : "heap-chunk-free"}`;
         const widthPx = Math.max(54, Math.min(220, Math.round(c.size * 1.2)));
         box.style.width = `${widthPx}px`;
-        const label = isAlloc ? "ALLOC" : "FREE";
+        const label = c.isMmap ? "MMAP" : c.isRaw ? "RAW" : (isAlloc ? "ALLOC" : "FREE");
         const addrHex = `0x${c.addr.toString(16)}`;
         box.title = `Chunk @ ${addrHex} • Size: ${c.size}B (Payload: ${c.payloadSize}B) • ${label} (Click to inspect in Hex)`;
         box.innerHTML = `<span style="font-weight: 700;">${label}</span><span>${c.size}B</span>`;
@@ -722,17 +738,18 @@ function updateHeapView() {
 
   if (heapTableBody) {
     heapTableBody.innerHTML = "";
-    if (stats.chunks.length === 0) {
+    if (allItems.length === 0) {
       heapTableBody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 14px;">No heap chunks recorded.</td></tr>`;
     } else {
-      stats.chunks.forEach(c => {
+      allItems.forEach(c => {
         const isAlloc = c.isAllocated;
+        const badgeLabel = c.isMmap ? "MMAP" : c.isRaw ? "RAW" : (isAlloc ? "ALLOC" : "FREE");
         const tr = document.createElement("tr");
         tr.style.cursor = "pointer";
         tr.title = "Click to inspect chunk header in Memory Hex view";
         tr.innerHTML = `
           <td class="hex-addr">0x${c.addr.toString(16).padStart(8, "0")}</td>
-          <td><span class="heap-badge ${isAlloc ? "badge-alloc" : "badge-free"}">${isAlloc ? "ALLOC" : "FREE"}</span></td>
+          <td><span class="heap-badge ${isAlloc ? "badge-alloc" : "badge-free"}">${badgeLabel}</span></td>
           <td style="color: var(--text-primary); font-weight: 600;">${c.size} B</td>
           <td style="color: ${isAlloc ? "var(--accent-cyan)" : "var(--text-muted)"};">${c.payloadSize} B</td>
           <td class="mono" style="color: ${isAlloc ? "var(--accent-amber)" : "var(--text-muted)"};">0x${c.payloadAddr.toString(16).padStart(8, "0")}</td>
@@ -850,9 +867,10 @@ function startRunning() {
           updateCPUState(lastRes.changedRegs);
           updateDisassemblyPointer();
           updateMemoryGrid(currentMemAddr);
+          updateHeapView();
           renderVramScreen(true);
+          stopRunning();
           if (lastRes.hitBreakpoint) {
-            stopRunning();
             setStatus("PAUSED", `BP @ 0x${lastRes.nextPC.toString(16)}`, "status-paused");
           }
           return;
@@ -860,6 +878,7 @@ function startRunning() {
         if (lastRes.yielded) {
           changedMemoryBytes = new Set(lastRes.changedMem || []);
           updateCPUState(lastRes.changedRegs);
+          updateHeapView();
           renderVramScreen(true);
           runTimer = requestAnimationFrame(turboLoop);
           return;
@@ -871,6 +890,7 @@ function startRunning() {
       }
       updateDisassemblyPointer();
       updateMemoryGrid(currentMemAddr);
+      updateHeapView();
       renderVramScreen();
       runTimer = requestAnimationFrame(turboLoop);
     }

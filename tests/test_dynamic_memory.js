@@ -44,7 +44,18 @@ console.log("Running Dynamic Memory & Heap Allocator Tests...\n");
 
   const pagesAfter = emu.memory.getPageCount();
   assert.strictEqual(pagesAfter, pagesBefore - 1, "Contracting brk must free deallocated physical pages");
-  console.log("[PASS] sys_brk expansion and page-reclaiming contraction verified");
+
+  // Sub-page contraction (0x00500200 -> 0x00500100) must preserve lower half of page
+  emu.memory.write64(0x00500000, 0xdeadbeefcafebaben);
+  emu.memory.write64(0x00500150, 0x123456789abcdef0n);
+  emu.cpu.pc = 0x00400000n;
+  emu.cpu.setReg(0, 0x00500100n);
+  emu.cpu.setReg(8, 214n);
+  emu.step(false);
+  assert.strictEqual(emu.brk, 0x00500100n, "brk must contract to 0x00500100");
+  assert.strictEqual(emu.memory.read64(0x00500000), 0xdeadbeefcafebaben, "Sub-page brk contraction must preserve active lower bytes on page");
+  assert.strictEqual(emu.memory.read64(0x00500150), 0n, "Sub-page brk contraction must zero out reclaimed upper bytes on page");
+  console.log("[PASS] sys_brk expansion, full-page reclamation, and sub-page contraction verified");
 }
 
 // 2. Test sys_mmap and sys_munmap
@@ -122,7 +133,23 @@ console.log("Running Dynamic Memory & Heap Allocator Tests...\n");
   const bodySource = jsCode.replace(/export\s+function\s+runNative\s*\(\)\s*\{/, "").replace(/\}\s*$/, "");
   const nativeFn = new Function(bodySource);
   assert.strictEqual(nativeFn(), 42, "Static AOT runNative() must return exit code 42");
-  console.log("[PASS] StaticRecompiler executes dynamic_memory.elf and returns 42");
+
+  // Also test raw bump allocation & Static AOT on bin/heap_demo.elf
+  const emuRaw = new MiniQEMU();
+  emuRaw.loadElf("bin/heap_demo.elf");
+  const rawExit = emuRaw.run(10000, false);
+  assert.strictEqual(rawExit, 150, "heap_demo.elf must exit with sum 150");
+  const rawStats = emuRaw.getHeapStats();
+  assert.strictEqual(rawStats.heapStart, 0x00500000, "heapStart must default to 0x00500000");
+  assert.strictEqual(rawStats.chunks.length, 1, "Raw bump heap must be classified as 1 raw block");
+  assert.strictEqual(rawStats.chunks[0].isRaw, true, "Raw bump heap chunk must have isRaw = true");
+  assert.strictEqual(rawStats.chunks[0].size, 40, "Raw bump heap chunk size must be 40 bytes");
+
+  const aotHeapDemo = new StaticRecompiler("bin/heap_demo.elf");
+  const jsHeapDemo = aotHeapDemo.recompile(false);
+  const fnHeapDemo = new Function(jsHeapDemo.replace(/export\s+function\s+runNative\s*\(\)\s*\{/, "").replace(/\}\s*$/, ""));
+  assert.strictEqual(fnHeapDemo(), 150, "Static AOT runNative() on heap_demo.elf must return 150");
+  console.log("[PASS] StaticRecompiler & raw bump-heap inspector verified on dynamic_memory.elf (42) and heap_demo.elf (150)");
 }
 
 // 5. Test x86-64 Translator on dynamic_memory.elf

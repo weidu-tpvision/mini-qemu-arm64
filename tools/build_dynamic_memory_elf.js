@@ -141,17 +141,20 @@ export function generateDynamicMemoryElf() {
   instructions.push(encAddImm(23, 20, 8));                 // x23 = p3 = x20 + 8
   instructions.push(encAddImm(20, 0, 0));                  // x20 = current_brk
 
-  // Write payload to p3: 0x5555555566666666
+  // Write payload to p3: 0x5555555566666666 and verification value 30 at [p3 + 8]
   instructions.push(encMovz(2, 0x6666));
   instructions.push(encMovk(2, 0x6666, 16));
   instructions.push(encMovk(2, 0x5555, 32));
   instructions.push(encMovk(2, 0x5555, 48));
   instructions.push(encStrImm(2, 23, 0));                  // str x2, [p3]
+  instructions.push(encMovz(2, 30));
+  instructions.push(encStrImm(2, 23, 8));                  // str x2, [p3, #8]
 
   // --- Step 5: free(p2) -> Creates an 80-byte FREE HOLE between p1 and p3 ---
-  // Header at (p2 - 8): clear bit 0 -> size becomes 80 (0x50, free)
+  // Load header at (p2 - 8), clear allocated bit 0 dynamically -> size becomes 80 (0x50, free)
   instructions.push(encSubImm(3, 22, 8));                  // x3 = p2 - 8 (chunk header addr)
-  instructions.push(encMovz(1, 80));                       // size 80 (free, bit 0 = 0)
+  instructions.push(encLdrImm(1, 3, 0));                   // ldr x1, [p2 - 8] (81)
+  instructions.push(encSubImm(1, 1, 1));                   // clear bit 0 -> 80 (free)
   instructions.push(encStrImm(1, 3, 0));                   // str x1, [p2 - 8]
 
   // --- Step 6: malloc(48) -> REUSES the freed p2 hole without expanding brk! ---
@@ -174,12 +177,16 @@ export function generateDynamicMemoryElf() {
   instructions.push(encStrImm(2, 24, 0));                  // str x2, [p4]
 
   // --- Step 7: free(p1) and free(p4) -> ADJACENT COALESCING ---
-  // Chunk 1 at x19: size 48 (free)
-  // Chunk 2 at (x19 + 48): size 64 (free)
-  // Chunk 3 at (x19 + 48 + 64): size 16 (free)
-  // Coalesce into one single large free chunk: 48 + 64 + 16 = 128 bytes!
-  instructions.push(encMovz(1, 128));                      // 128 bytes free
-  instructions.push(encStrImm(1, 19, 0));                  // str x1, [x19] (coalesced header)
+  // Dynamically load headers of Chunk 1 (x19), Chunk 2 (x3), and Chunk 3 (x4),
+  // clear their allocated bits, and sum their sizes: 48 + 64 + 16 = 128 bytes!
+  instructions.push(encLdrImm(1, 19, 0));                  // ldr x1, [x19] (49)
+  instructions.push(encSubImm(1, 1, 1));                   // x1 = 48 (free p1)
+  instructions.push(encLdrImm(2, 3, 0));                   // ldr x2, [x3] (65)
+  instructions.push(encSubImm(2, 2, 1));                   // x2 = 64 (free p4)
+  instructions.push(encLdrImm(6, 4, 0));                   // ldr x6, [x4] (16, already free)
+  instructions.push(encAddReg(1, 1, 2));                   // x1 = 48 + 64 = 112
+  instructions.push(encAddReg(1, 1, 6));                   // x1 = 112 + 16 = 128
+  instructions.push(encStrImm(1, 19, 0));                  // str x1, [x19] (coalesced 128B free header)
 
   // --- Step 8: malloc(96) -> Allocates from newly coalesced 128-byte free block ---
   // 96B payload + 8B header = 104 -> aligned to 112 bytes total.
@@ -191,18 +198,23 @@ export function generateDynamicMemoryElf() {
   instructions.push(encMovz(1, 16));                       // 16 | 0 = 16
   instructions.push(encStrImm(1, 5, 0));                   // str x1, [x5]
 
-  // Write payload to p5: 0x99999999AAAAAAAA
+  // Write payload to p5: 0x99999999AAAAAAAA and verification value 12 at [p5 + 8]
   instructions.push(encMovz(2, 0xaaaa));
   instructions.push(encMovk(2, 0xaaaa, 16));
   instructions.push(encMovk(2, 0x9999, 32));
   instructions.push(encMovk(2, 0x9999, 48));
   instructions.push(encStrImm(2, 25, 0));                  // str x2, [p5]
+  instructions.push(encMovz(2, 12));
+  instructions.push(encStrImm(2, 25, 8));                  // str x2, [p5, #8]
 
-  // --- Step 9: Verify Data Integrity ---
+  // --- Step 9: Verify Data Integrity from Heap Payloads ---
   // Load p3 (from step 4) and p5 (from step 8)
   instructions.push(encLdrImm(6, 23, 0));                  // ldr x6, [p3]
   instructions.push(encLdrImm(7, 25, 0));                  // ldr x7, [p5]
-  instructions.push(encEorReg(0, 6, 7));                   // x0 = x6 ^ x7
+  instructions.push(encEorReg(27, 6, 7));                  // x27 = x6 ^ x7
+  instructions.push(encLdrImm(6, 23, 8));                  // ldr x6, [p3, #8] (30)
+  instructions.push(encLdrImm(7, 25, 8));                  // ldr x7, [p5, #8] (12)
+  instructions.push(encAddReg(26, 6, 7));                  // x26 = 30 + 12 = 42
 
   // --- Step 10: Print confirmation string via sys_write(1, msg, len) ---
   const ADR_MSG_IDX = instructions.length;
@@ -212,8 +224,8 @@ export function generateDynamicMemoryElf() {
   instructions.push(encMovz(8, 64));                       // x8 = 64 (sys_write)
   instructions.push(encSvc(0));                            // svc #0
 
-  // --- Step 11: sys_exit(42) ---
-  instructions.push(encMovz(0, 42));                       // x0 = 42
+  // --- Step 11: sys_exit(x26) -> returns 42 computed from heap loads ---
+  instructions.push(encAddImm(0, 26, 0));                  // x0 = x26 (42)
   instructions.push(encMovz(8, 93));                       // x8 = 93 (sys_exit)
   instructions.push(encSvc(0));                            // svc #0
 
