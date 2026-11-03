@@ -114,6 +114,7 @@ let currentLoadedBuffer = null;
 let currentLoadedName = "fib.elf";
 let currentAotSource = "";
 let changedRegisters = new Set();
+let changedFRegisters = new Set();
 let changedMemoryBytes = new Set();
 
 const SPEED_LEVELS = {
@@ -212,7 +213,7 @@ function initRegistersTable() {
 }
 
 // 2. Update CPU State (Registers, Flags, PC/SP, and Live Pipeline Bar)
-function updateCPUState(changed = []) {
+function updateCPUState(changed = [], changedFRegs = []) {
   const pc = Number(emulator.cpu.pc);
   const sp = emulator.cpu.sp;
   const fp = emulator.cpu.getReg(29);
@@ -241,6 +242,12 @@ function updateCPUState(changed = []) {
     if (row) row.classList.remove("changed");
   });
   changedRegisters.clear();
+
+  changedFRegisters.forEach(idx => {
+    const row = document.getElementById(`neon-row-${idx}`);
+    if (row) row.classList.remove("changed");
+  });
+  changedFRegisters.clear();
 
   // Update register values
   for (let i = 0; i < 31; i++) {
@@ -277,6 +284,18 @@ function updateCPUState(changed = []) {
         if (row) {
           row.classList.add("changed");
           changedRegisters.add(item.index);
+        }
+      }
+    });
+  }
+
+  if (changedFRegs && changedFRegs.length > 0) {
+    changedFRegs.forEach(idx => {
+      if (idx >= 0 && idx < 32) {
+        const row = document.getElementById(`neon-row-${idx}`);
+        if (row) {
+          row.classList.add("changed");
+          changedFRegisters.add(idx);
         }
       }
     });
@@ -567,28 +586,64 @@ function getInstructionAnnotation(decoded, addr = 0) {
     case InstructionType.FSUB:
     case InstructionType.FMUL:
     case InstructionType.FDIV:
-      return `${decoded.isDouble ? "Double" : "Single"} Float: ${decoded.disassembly}`;
+    case InstructionType.FNMUL:
+    case InstructionType.FMAX:
+    case InstructionType.FMIN:
+    case InstructionType.FNEG:
+    case InstructionType.FABS:
+    case InstructionType.FSQRT:
+      return `${decoded.isDouble ? "Double" : "Single"} Scalar VFP Math (${decoded.disassembly})`;
     case InstructionType.FCMP:
       return `Compare Floats (${decoded.disassembly}) → Update NZCV Flags`;
+    case InstructionType.FCVT:
+      return `Convert Float Precision (${decoded.disassembly})`;
     case InstructionType.SCVTF:
     case InstructionType.UCVTF:
       return `Convert Integer to ${decoded.isDouble ? "Double" : "Single"} Float`;
     case InstructionType.FCVTZS:
     case InstructionType.FCVTZU:
-      return `Convert Float to Integer (Truncate)`;
+      return `Convert Float to Integer (Truncate towards Zero)`;
+    case InstructionType.FMOV:
+      return `Floating-Point Move / Bitcast (${decoded.disassembly})`;
     case InstructionType.FADD_VEC:
     case InstructionType.FSUB_VEC:
     case InstructionType.FMUL_VEC:
     case InstructionType.FDIV_VEC:
+    case InstructionType.FMAX_VEC:
+    case InstructionType.FMIN_VEC:
+    case InstructionType.FNEG_VEC:
+    case InstructionType.FABS_VEC:
       return `NEON SIMD Vector Float Math (${decoded.disassembly})`;
     case InstructionType.FADDP_VEC:
       return `NEON SIMD Pairwise Vector Float Add / Dot-Product Reduction`;
+    case InstructionType.ADD_VEC:
+    case InstructionType.SUB_VEC:
+    case InstructionType.MUL_VEC:
+    case InstructionType.ADDP_VEC:
+      return `NEON SIMD Packed Integer Vector Math (${decoded.disassembly})`;
+    case InstructionType.AND_VEC:
+    case InstructionType.ORR_VEC:
+    case InstructionType.EOR_VEC:
+    case InstructionType.NOT_VEC:
+      return `NEON SIMD Bitwise Vector Logic (${decoded.disassembly})`;
+    case InstructionType.DUP_GEN:
+    case InstructionType.DUP_ELEM:
+      return `NEON SIMD Splat / Broadcast to All Lanes (${decoded.disassembly})`;
+    case InstructionType.INS_GEN:
+    case InstructionType.INS_ELEM:
+      return `NEON SIMD Insert Lane Element (${decoded.disassembly})`;
+    case InstructionType.UMOV_ELEM:
+      return `NEON SIMD Extract Vector Lane to GPR (${decoded.disassembly})`;
     case InstructionType.LDR_FREG:
     case InstructionType.STR_FREG:
-      return `${decoded.type === InstructionType.LDR_FREG ? "Load" : "Store"} Float Register (${decoded.disassembly})`;
+    case InstructionType.LDP_FREG:
+    case InstructionType.STP_FREG:
+      return `Float Register Memory Transfer (${decoded.disassembly})`;
     case InstructionType.LDR_VREG:
     case InstructionType.STR_VREG:
-      return `${decoded.type === InstructionType.LDR_VREG ? "Load" : "Store"} 128-bit NEON Vector Register (${decoded.disassembly})`;
+    case InstructionType.LDP_VREG:
+    case InstructionType.STP_VREG:
+      return `128-bit NEON Vector Memory Transfer (${decoded.disassembly})`;
     default:
       return "";
   }
@@ -911,7 +966,7 @@ function stepSingle() {
   changedMemoryBytes = new Set(res.changedMem || []);
 
   // If the instruction wrote to memory outside stack, optionally show it if user is on RAM
-  updateCPUState(res.changedRegs);
+  updateCPUState(res.changedRegs, res.changedFRegs);
   updateDisassemblyPointer();
   updateMemoryGrid(currentMemAddr);
   updateHeapView();
@@ -949,7 +1004,7 @@ function startRunning() {
         lastRes = emulator.step(false);
         if (lastRes.halted || lastRes.hitBreakpoint) {
           changedMemoryBytes = new Set(lastRes.changedMem || []);
-          updateCPUState(lastRes.changedRegs);
+          updateCPUState(lastRes.changedRegs, lastRes.changedFRegs);
           updateDisassemblyPointer();
           updateMemoryGrid(currentMemAddr);
           updateHeapView();
@@ -962,7 +1017,7 @@ function startRunning() {
         }
         if (lastRes.yielded) {
           changedMemoryBytes = new Set(lastRes.changedMem || []);
-          updateCPUState(lastRes.changedRegs);
+          updateCPUState(lastRes.changedRegs, lastRes.changedFRegs);
           updateHeapView();
           renderVramScreen(true);
           runTimer = requestAnimationFrame(turboLoop);
@@ -971,7 +1026,7 @@ function startRunning() {
       }
       if (lastRes) {
         changedMemoryBytes = new Set(lastRes.changedMem || []);
-        updateCPUState(lastRes.changedRegs);
+        updateCPUState(lastRes.changedRegs, lastRes.changedFRegs);
       }
       updateDisassemblyPointer();
       updateMemoryGrid(currentMemAddr);

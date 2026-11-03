@@ -1044,8 +1044,8 @@ export class Decoder {
         }
       }
 
-      // (d) FP 1-source: bit 14 set or bits [15:10] in 0x10..0x30
-      if ((raw & 0x5f207c00) === 0x1e204000 || (b15_10 & 0x10) !== 0) {
+      // (d) FP 1-source: bits [14:10] == 10000 (0x10)
+      if ((raw & 0x5f207c00) === 0x1e204000) {
         const opcode = (raw >>> 15) & 0x3f;
         if (opcode === 0b000000) {
           return { type: InstructionType.FMOV, raw, ftype, isDouble, rd, rn, disassembly: `fmov ${p}${rd}, ${p}${rn}` };
@@ -1068,8 +1068,8 @@ export class Decoder {
         }
       }
 
-      // (e) FP Immediate: bits [15:10] == 000100 (0x04)
-      if (b15_10 === 0x04 || (raw & 0xff200000) === 0x1e201000) {
+      // (e) FP Immediate: bits [12:10] == 100 (0x04)
+      if ((raw & 0x5f201fe0) === 0x1e201000 || b15_10 === 0x04) {
         const imm8 = (raw >>> 13) & 0xff;
         const sign = (imm8 >> 7) & 1;
         const exp = ((imm8 >> 4) & 7) ^ 4;
@@ -1088,9 +1088,8 @@ export class Decoder {
     const elemStr = size === 0 ? "b" : size === 1 ? "h" : size === 2 ? "s" : "d";
     const arrStr = `${lanes}${elemStr}`;
 
-    // (a) Advanced SIMD Copy / Splat (DUP, INS, UMOV)
-    // Mask: (raw & 0x9f000400) === 0x0e000400
-    if ((raw & 0x9f000400) === 0x0e000400) {
+    // (a) Advanced SIMD Copy / Splat (DUP, INS, UMOV): bits [23:21] == 000, bit 15 == 0, bit 10 == 1
+    if ((raw & 0x9fe08400) === 0x0e000400) {
       const imm5 = (raw >>> 16) & 0x1f;
       const op = (raw >>> 29) & 1;
       let elemSize = -1;
@@ -1108,6 +1107,11 @@ export class Decoder {
                          : (elemSize === 0 ? 8 : elemSize === 1 ? 4 : elemSize === 2 ? 2 : 1);
         const aStr = `${lCount}${eStr}`;
 
+        // INS element to element: op == 1 && Q == 1
+        if (op === 1 && Q === 1) {
+          const srcLane = subOp >> elemSize;
+          return { type: InstructionType.INS_ELEM, raw, elemSize, dstLane: lane, srcLane, rd, rn, disassembly: `ins v${rd}.${eStr}[${lane}], v${rn}.${eStr}[${srcLane}]` };
+        }
         // DUP element: subOp == 0000
         if (subOp === 0b0000 && op === 0) {
           return { type: InstructionType.DUP_ELEM, raw, Q, elemSize, lane, rd, rn, disassembly: `dup v${rd}.${aStr}, v${rn}.${eStr}[${lane}]` };
@@ -1130,33 +1134,46 @@ export class Decoder {
       }
     }
 
-    // (b) NEON 3-same Vector Floating-Point
-    const floatLanes = Q ? (size === 0 ? 4 : 2) : (size === 0 ? 2 : 1);
-    const floatArr = `${floatLanes}${size === 0 ? "s" : "d"}`;
+    // (b) NEON 2-register Misc (Float Neg, Float Abs, Bitwise NOT)
+    const fSize = (raw >>> 22) & 1; // 0 = Single (S), 1 = Double (D)
+    const floatLanes = Q ? (fSize === 0 ? 4 : 2) : (fSize === 0 ? 2 : 1);
+    const floatArr = `${floatLanes}${fSize === 0 ? "s" : "d"}`;
+    const byteArr = Q ? "16b" : "8b";
 
-    if ((raw & 0xbf20fc00) === 0x0e20d400) {
-      return { type: InstructionType.FADD_VEC, raw, Q, size, isDouble: size === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fadd v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    if ((raw & 0xbfbffc00) === 0x2ea0f800) {
+      return { type: InstructionType.FNEG_VEC, raw, Q, size: fSize, isDouble: fSize === 1, lanes: floatLanes, rd, rn, disassembly: `fneg v${rd}.${floatArr}, v${rn}.${floatArr}` };
     }
-    if ((raw & 0xbf20fc00) === 0x0ea0d400) {
-      return { type: InstructionType.FSUB_VEC, raw, Q, size, isDouble: size === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fsub v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    if ((raw & 0xbfbffc00) === 0x0ea0f800) {
+      return { type: InstructionType.FABS_VEC, raw, Q, size: fSize, isDouble: fSize === 1, lanes: floatLanes, rd, rn, disassembly: `fabs v${rd}.${floatArr}, v${rn}.${floatArr}` };
     }
-    if ((raw & 0xbf20fc00) === 0x2e20dc00) {
-      return { type: InstructionType.FMUL_VEC, raw, Q, size, isDouble: size === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fmul v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
-    }
-    if ((raw & 0xbf20fc00) === 0x2ea0fc00) {
-      return { type: InstructionType.FDIV_VEC, raw, Q, size, isDouble: size === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fdiv v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
-    }
-    if ((raw & 0xbf20fc00) === 0x2e20d400) {
-      return { type: InstructionType.FADDP_VEC, raw, Q, size, isDouble: size === 1, lanes: floatLanes, rd, rn, rm, disassembly: `faddp v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
-    }
-    if ((raw & 0xbf20fc00) === 0x0e20f400) {
-      return { type: InstructionType.FMAX_VEC, raw, Q, size, isDouble: size === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fmax v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
-    }
-    if ((raw & 0xbf20fc00) === 0x0ea0f400) {
-      return { type: InstructionType.FMIN_VEC, raw, Q, size, isDouble: size === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fmin v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    if ((raw & 0xbfbffc00) === 0x2e205800) {
+      return { type: InstructionType.NOT_VEC, raw, Q, rd, rn, disassembly: `mvn v${rd}.${byteArr}, v${rn}.${byteArr}` };
     }
 
-    // (c) NEON 3-same Vector Integer Arithmetic & Logic
+    // (c) NEON 3-same Vector Floating-Point (mask 0xbfa0fc00 checks bit 23 op and ignores bit 22 sz)
+    if ((raw & 0xbfa0fc00) === 0x0e20d400) {
+      return { type: InstructionType.FADD_VEC, raw, Q, size: fSize, isDouble: fSize === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fadd v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    }
+    if ((raw & 0xbfa0fc00) === 0x0ea0d400) {
+      return { type: InstructionType.FSUB_VEC, raw, Q, size: fSize, isDouble: fSize === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fsub v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    }
+    if ((raw & 0xbfa0fc00) === 0x2e20dc00) {
+      return { type: InstructionType.FMUL_VEC, raw, Q, size: fSize, isDouble: fSize === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fmul v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    }
+    if ((raw & 0xbfa0fc00) === 0x2ea0fc00) {
+      return { type: InstructionType.FDIV_VEC, raw, Q, size: fSize, isDouble: fSize === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fdiv v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    }
+    if ((raw & 0xbfa0fc00) === 0x2e20d400) {
+      return { type: InstructionType.FADDP_VEC, raw, Q, size: fSize, isDouble: fSize === 1, lanes: floatLanes, rd, rn, rm, disassembly: `faddp v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    }
+    if ((raw & 0xbfa0fc00) === 0x0e20f400) {
+      return { type: InstructionType.FMAX_VEC, raw, Q, size: fSize, isDouble: fSize === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fmax v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    }
+    if ((raw & 0xbfa0fc00) === 0x0ea0f400) {
+      return { type: InstructionType.FMIN_VEC, raw, Q, size: fSize, isDouble: fSize === 1, lanes: floatLanes, rd, rn, rm, disassembly: `fmin v${rd}.${floatArr}, v${rn}.${floatArr}, v${rm}.${floatArr}` };
+    }
+
+    // (d) NEON 3-same Vector Integer Arithmetic & Logic
     if ((raw & 0xbf20fc00) === 0x0e208400) {
       return { type: InstructionType.ADD_VEC, raw, Q, size, lanes, rd, rn, rm, disassembly: `add v${rd}.${arrStr}, v${rn}.${arrStr}, v${rm}.${arrStr}` };
     }
@@ -1170,24 +1187,16 @@ export class Decoder {
       return { type: InstructionType.ADDP_VEC, raw, Q, size, lanes, rd, rn, rm, disassembly: `addp v${rd}.${arrStr}, v${rn}.${arrStr}, v${rm}.${arrStr}` };
     }
     if ((raw & 0xbfe0fc00) === 0x0e201c00) {
-      return { type: InstructionType.AND_VEC, raw, Q, rd, rn, rm, disassembly: `and v${rd}.16b, v${rn}.16b, v${rm}.16b` };
+      return { type: InstructionType.AND_VEC, raw, Q, rd, rn, rm, disassembly: `and v${rd}.${byteArr}, v${rn}.${byteArr}, v${rm}.${byteArr}` };
     }
     if ((raw & 0xbfe0fc00) === 0x0ea01c00) {
-      return { type: InstructionType.ORR_VEC, raw, Q, rd, rn, rm, disassembly: `orr v${rd}.16b, v${rn}.16b, v${rm}.16b` };
+      return { type: InstructionType.ORR_VEC, raw, Q, rd, rn, rm, disassembly: `orr v${rd}.${byteArr}, v${rn}.${byteArr}, v${rm}.${byteArr}` };
     }
     if ((raw & 0xbfe0fc00) === 0x2e201c00) {
-      return { type: InstructionType.EOR_VEC, raw, Q, rd, rn, rm, disassembly: `eor v${rd}.16b, v${rn}.16b, v${rm}.16b` };
+      return { type: InstructionType.EOR_VEC, raw, Q, rd, rn, rm, disassembly: `eor v${rd}.${byteArr}, v${rn}.${byteArr}, v${rm}.${byteArr}` };
     }
     if ((raw & 0xbfe0fc00) === 0x2ea01c00) {
-      return { type: InstructionType.NOT_VEC, raw, Q, rd, rn, disassembly: `mvn v${rd}.16b, v${rn}.16b` };
-    }
-
-    // (d) NEON 2-register Misc (Float Neg & Abs)
-    if ((raw & 0xbfa0fc00) === 0x2ea0f400) {
-      return { type: InstructionType.FNEG_VEC, raw, Q, size, lanes: floatLanes, rd, rn, disassembly: `fneg v${rd}.${floatArr}, v${rn}.${floatArr}` };
-    }
-    if ((raw & 0xbfa0fc00) === 0x0ea0f400) {
-      return { type: InstructionType.FABS_VEC, raw, Q, size, lanes: floatLanes, rd, rn, disassembly: `fabs v${rd}.${floatArr}, v${rn}.${floatArr}` };
+      return { type: InstructionType.NOT_VEC, raw, Q, rd, rn, disassembly: `mvn v${rd}.${byteArr}, v${rn}.${byteArr}` };
     }
 
     return { type: InstructionType.UNKNOWN, raw, disassembly: `unknown fp/neon 0x${raw.toString(16)}` };

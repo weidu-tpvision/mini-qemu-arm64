@@ -45,6 +45,8 @@ this.vFloat64 = new Float64Array(this.vBuffer);  // 64-bit IEEE-754 double float
 Per ARM64 specifications:
 - Writing to a scalar `Sn` register writes to `vFloat32[n * 4]` and **clears the upper 96 bits** of `Vn`.
 - Writing to a scalar `Dn` register writes to `vFloat64[n * 2]` and **clears the upper 64 bits** of `Vn`.
+- Executing any 64-bit (`Q=0`) NEON vector instruction (`.8b`, `.4h`, `.2s`, `.1d`) writes the lower 64 bits and **clears the upper 64 bits (`[127:64]`)** of `Vn`.
+- Special IEEE-754 values (`NaN` and `-0.0`) are preserved across all typed array lane accessors without falsy coercion.
 
 ---
 
@@ -75,27 +77,29 @@ This enables all existing conditional branches (`B.EQ`, `B.NE`, `B.LT`, `B.LE`, 
 ### 3.3 Conversions & Moves
 - **`SCVTF`**: Signed integer to float (`scvtf d0, x1`, `scvtf s0, w1`).
 - **`UCVTF`**: Unsigned integer to float (`ucvtf d0, x1`).
-- **`FCVTZS`**: Float to signed integer with truncation toward zero (`fcvtzs x0, d1`, `fcvtzs w0, s1`).
-- **`FCVTZU`**: Float to unsigned integer with truncation toward zero.
+- **`FCVTZS`**: Float to signed integer with truncation toward zero (`fcvtzs x0, d1`, `fcvtzs w0, s1`). Returns `0` for `NaN` and saturates out-of-range values (`±Infinity`) to `[INT_MIN, INT_MAX]`.
+- **`FCVTZU`**: Float to unsigned integer with truncation toward zero. Returns `0` for `NaN` or negative inputs and saturates `+Infinity` to `UINT_MAX`.
 - **`FCVT`**: Float precision conversion (Single $\leftrightarrow$ Double: `fcvt d0, s1`, `fcvt s0, d1`).
 - **`FMOV`**:
   - Register-to-register copy (`fmov d0, d1`).
   - Bitwise GPR $\leftrightarrow$ FPR bitcasts (`fmov x0, d1`, `fmov d0, x1`, `fmov w0, s1`, `fmov s0, w1`).
-  - Immediate load (`fmov s0, #1.0`, `fmov d0, #2.0`).
+  - Immediate load (`fmov s0, #1.0`, `fmov d0, #2.0`, `fmov d0, #1.125`).
 
 ### 3.4 NEON Advanced SIMD Vector Operations
 - **Vector Arithmetic**:
   - `FMUL_VEC`: Element-wise multiply (`fmul v0.4s, v1.4s, v2.4s`, `fmul v0.2d, v1.2d, v2.2d`).
-  - `FADD_VEC`: Element-wise add (`fadd v0.4s, v1.4s, v2.4s`).
-  - `FSUB_VEC`: Element-wise subtract (`fsub v0.4s, v1.4s, v2.4s`).
-  - `FDIV_VEC`: Element-wise divide (`fdiv v0.4s, v1.4s, v2.4s`).
+  - `FADD_VEC`: Element-wise add (`fadd v0.4s, v1.4s, v2.4s`, `fadd v0.2d, v1.2d, v2.2d`).
+  - `FSUB_VEC`: Element-wise subtract (`fsub v0.4s, v1.4s, v2.4s`, `fsub v0.2d, v1.2d, v2.2d`).
+  - `FDIV_VEC`: Element-wise divide (`fdiv v0.4s, v1.4s, v2.4s`, `fdiv v0.2d, v1.2d, v2.2d`).
   - `FADDP_VEC`: Pairwise reduction add (`faddp v0.4s, v1.4s, v2.4s`), essential for dot products and matrix multiplications.
-  - `ADD_VEC`, `SUB_VEC`, `MUL_VEC`: Integer vector arithmetic (`.16b`, `.8h`, `.4s`, `.2d`).
-  - `AND_VEC`, `ORR_VEC`, `EOR_VEC`, `NOT_VEC`: 128-bit bitwise logic.
+  - `FMAX_VEC`, `FMIN_VEC`, `FNEG_VEC`, `FABS_VEC`: Vector floating-point extrema, negation, and absolute value.
+  - `ADD_VEC`, `SUB_VEC`, `MUL_VEC`, `ADDP_VEC`: Integer vector arithmetic and pairwise addition (`.8b`/`.16b`, `.4h`/`.8h`, `.2s`/`.4s`, `.1d`/`.2d`).
+  - `AND_VEC`, `ORR_VEC`, `EOR_VEC`, `NOT_VEC`: 64-bit (`.8b`) and 128-bit (`.16b`) bitwise logic.
 - **Splat & Element Manipulation**:
   - `DUP_ELEM`: Splat vector lane into vector (`dup v0.4s, v1.s[0]`).
   - `DUP_GEN`: Splat general register into all vector lanes (`dup v0.4s, w1`).
   - `INS_GEN`: Insert general register value into vector lane (`ins v0.s[2], w1`).
+  - `INS_ELEM`: Copy lane from source vector into destination vector lane (`ins v0.s[2], v1.s[1]`).
   - `UMOV_ELEM`: Extract vector lane to general register (`umov w0, v1.s[1]`).
 
 ### 3.5 Loads and Stores

@@ -343,11 +343,23 @@ export class StaticRecompiler {
         case InstructionType.FADD:
         case InstructionType.FSUB:
         case InstructionType.FMUL:
-        case InstructionType.FDIV: {
+        case InstructionType.FDIV:
+        case InstructionType.FNMUL:
+        case InstructionType.FMAX:
+        case InstructionType.FMIN: {
           const arr = decoded.isDouble ? "vFloat64" : "vFloat32";
           const s = decoded.isDouble ? 2 : 4;
-          const op = decoded.type === InstructionType.FADD ? "+" : decoded.type === InstructionType.FSUB ? "-" : decoded.type === InstructionType.FMUL ? "*" : "/";
-          lines.push(`${indent}${arr}[${decoded.rd * s}] = ${arr}[${decoded.rn * s}] ${op} ${arr}[${decoded.rm * s}]; // ${decoded.disassembly}`);
+          const a = `${arr}[${decoded.rn * s}]`;
+          const b = `${arr}[${decoded.rm * s}]`;
+          let expr = "";
+          if (decoded.type === InstructionType.FADD) expr = `${a} + ${b}`;
+          else if (decoded.type === InstructionType.FSUB) expr = `${a} - ${b}`;
+          else if (decoded.type === InstructionType.FMUL) expr = `${a} * ${b}`;
+          else if (decoded.type === InstructionType.FDIV) expr = `${a} / ${b}`;
+          else if (decoded.type === InstructionType.FNMUL) expr = `-(${a} * ${b})`;
+          else if (decoded.type === InstructionType.FMAX) expr = `Math.max(${a}, ${b})`;
+          else if (decoded.type === InstructionType.FMIN) expr = `Math.min(${a}, ${b})`;
+          lines.push(`${indent}${arr}[${decoded.rd * s}] = ${expr}; // ${decoded.disassembly}`);
           break;
         }
 
@@ -370,7 +382,7 @@ export class StaticRecompiler {
           const arr = decoded.isDouble ? "vFloat64" : "vFloat32";
           const s = decoded.isDouble ? 2 : 4;
           const v2Expr = decoded.isZero ? "0.0" : `${arr}[${decoded.rm * s}]`;
-          lines.push(`${indent}{ const v1 = ${arr}[${decoded.rn * s}], v2 = ${v2Expr}; flagZ = (v1 === v2); flagN = (v1 < v2); } // ${decoded.disassembly}`);
+          lines.push(`${indent}{ const v1 = ${arr}[${decoded.rn * s}], v2 = ${v2Expr}; const nan = Number.isNaN(v1) || Number.isNaN(v2); flagN = !nan && (v1 < v2); flagZ = !nan && (v1 === v2); flagC = !nan && (v1 >= v2); flagV = nan; } // ${decoded.disassembly}`);
           break;
         }
 
@@ -394,7 +406,15 @@ export class StaticRecompiler {
           const arr = decoded.isDouble ? "vFloat64" : "vFloat32";
           const s = decoded.isDouble ? 2 : 4;
           const bits = decoded.sf === 0 ? 32 : 64;
-          lines.push(`${indent}x[${decoded.rd}] = BigInt.asUintN(${bits}, BigInt(Math.trunc(${arr}[${decoded.rn * s}]))); // ${decoded.disassembly}`);
+          lines.push(`${indent}{ const v = ${arr}[${decoded.rn * s}]; x[${decoded.rd}] = Number.isFinite(v) ? BigInt.asUintN(${bits}, BigInt(Math.trunc(v))) : 0n; } // ${decoded.disassembly}`);
+          break;
+        }
+
+        case InstructionType.FCVTZU: {
+          const arr = decoded.isDouble ? "vFloat64" : "vFloat32";
+          const s = decoded.isDouble ? 2 : 4;
+          const bits = decoded.sf === 0 ? 32 : 64;
+          lines.push(`${indent}{ const v = ${arr}[${decoded.rn * s}]; x[${decoded.rd}] = (Number.isFinite(v) && v > 0) ? BigInt.asUintN(${bits}, BigInt(Math.trunc(v))) : 0n; } // ${decoded.disassembly}`);
           break;
         }
 
@@ -466,15 +486,58 @@ export class StaticRecompiler {
           break;
         }
 
+        case InstructionType.LDP_FREG: {
+          const addrExpr = `${spOrReg(decoded.rn)} + ${decoded.offsetBytes || 0}n`;
+          lines.push(`${indent}vUint64[${decoded.rt1 * 2}] = mem.get(${addrExpr}) ?? 0n; vUint64[${decoded.rt2 * 2}] = mem.get((${addrExpr}) + 8n) ?? 0n; // ${decoded.disassembly}`);
+          break;
+        }
+
+        case InstructionType.STP_FREG: {
+          const addrExpr = `${spOrReg(decoded.rn)} + ${decoded.offsetBytes || 0}n`;
+          lines.push(`${indent}mem.set(${addrExpr}, vUint64[${decoded.rt1 * 2}]); mem.set((${addrExpr}) + 8n, vUint64[${decoded.rt2 * 2}]); // ${decoded.disassembly}`);
+          break;
+        }
+
+        case InstructionType.LDP_VREG: {
+          const addrExpr = `${spOrReg(decoded.rn)} + ${decoded.offsetBytes || 0}n`;
+          lines.push(`${indent}vUint64[${decoded.rt1 * 2}] = mem.get(${addrExpr}) ?? 0n; vUint64[${decoded.rt1 * 2 + 1}] = mem.get((${addrExpr}) + 8n) ?? 0n;`);
+          lines.push(`${indent}vUint64[${decoded.rt2 * 2}] = mem.get((${addrExpr}) + 16n) ?? 0n; vUint64[${decoded.rt2 * 2 + 1}] = mem.get((${addrExpr}) + 24n) ?? 0n; // ${decoded.disassembly}`);
+          break;
+        }
+
+        case InstructionType.STP_VREG: {
+          const addrExpr = `${spOrReg(decoded.rn)} + ${decoded.offsetBytes || 0}n`;
+          lines.push(`${indent}mem.set(${addrExpr}, vUint64[${decoded.rt1 * 2}]); mem.set((${addrExpr}) + 8n, vUint64[${decoded.rt1 * 2 + 1}]);`);
+          lines.push(`${indent}mem.set((${addrExpr}) + 16n, vUint64[${decoded.rt2 * 2}]); mem.set((${addrExpr}) + 24n, vUint64[${decoded.rt2 * 2 + 1}]); // ${decoded.disassembly}`);
+          break;
+        }
+
         case InstructionType.FADD_VEC:
         case InstructionType.FSUB_VEC:
         case InstructionType.FMUL_VEC:
-        case InstructionType.FDIV_VEC: {
+        case InstructionType.FDIV_VEC:
+        case InstructionType.FMAX_VEC:
+        case InstructionType.FMIN_VEC: {
           const lanes = decoded.lanes;
           const arr = decoded.isDouble ? "vFloat64" : "vFloat32";
           const mult = decoded.isDouble ? 2 : 4;
-          const op = decoded.type === InstructionType.FADD_VEC ? "+" : decoded.type === InstructionType.FSUB_VEC ? "-" : decoded.type === InstructionType.FMUL_VEC ? "*" : "/";
-          lines.push(`${indent}for (let i = 0; i < ${lanes}; i++) ${arr}[${decoded.rd * mult} + i] = ${arr}[${decoded.rn * mult} + i] ${op} ${arr}[${decoded.rm * mult} + i]; // ${decoded.disassembly}`);
+          if (decoded.type === InstructionType.FMAX_VEC || decoded.type === InstructionType.FMIN_VEC) {
+            const fn = decoded.type === InstructionType.FMAX_VEC ? "Math.max" : "Math.min";
+            lines.push(`${indent}for (let i = 0; i < ${lanes}; i++) ${arr}[${decoded.rd * mult} + i] = ${fn}(${arr}[${decoded.rn * mult} + i], ${arr}[${decoded.rm * mult} + i]); // ${decoded.disassembly}`);
+          } else {
+            const op = decoded.type === InstructionType.FADD_VEC ? "+" : decoded.type === InstructionType.FSUB_VEC ? "-" : decoded.type === InstructionType.FMUL_VEC ? "*" : "/";
+            lines.push(`${indent}for (let i = 0; i < ${lanes}; i++) ${arr}[${decoded.rd * mult} + i] = ${arr}[${decoded.rn * mult} + i] ${op} ${arr}[${decoded.rm * mult} + i]; // ${decoded.disassembly}`);
+          }
+          break;
+        }
+
+        case InstructionType.FNEG_VEC:
+        case InstructionType.FABS_VEC: {
+          const lanes = decoded.lanes;
+          const arr = decoded.isDouble ? "vFloat64" : "vFloat32";
+          const mult = decoded.isDouble ? 2 : 4;
+          const expr = decoded.type === InstructionType.FNEG_VEC ? `-${arr}[${decoded.rn * mult} + i]` : `Math.abs(${arr}[${decoded.rn * mult} + i])`;
+          lines.push(`${indent}for (let i = 0; i < ${lanes}; i++) ${arr}[${decoded.rd * mult} + i] = ${expr}; // ${decoded.disassembly}`);
           break;
         }
 
@@ -490,9 +553,52 @@ export class StaticRecompiler {
           break;
         }
 
+        case InstructionType.ADD_VEC:
+        case InstructionType.SUB_VEC:
+        case InstructionType.MUL_VEC: {
+          const lanes = decoded.lanes;
+          const op = decoded.type === InstructionType.ADD_VEC ? "+" : decoded.type === InstructionType.SUB_VEC ? "-" : "*";
+          lines.push(`${indent}for (let i = 0; i < ${lanes}; i++) vUint32[${decoded.rd * 4} + i] = (vUint32[${decoded.rn * 4} + i] ${op} vUint32[${decoded.rm * 4} + i]) >>> 0; // ${decoded.disassembly}`);
+          break;
+        }
+
+        case InstructionType.ADDP_VEC: {
+          lines.push(`${indent}{ const a = (vUint32[${decoded.rn * 4}] + vUint32[${decoded.rn * 4 + 1}]) >>> 0, b = (vUint32[${decoded.rn * 4 + 2}] + vUint32[${decoded.rn * 4 + 3}]) >>> 0, c = (vUint32[${decoded.rm * 4}] + vUint32[${decoded.rm * 4 + 1}]) >>> 0, d = (vUint32[${decoded.rm * 4 + 2}] + vUint32[${decoded.rm * 4 + 3}]) >>> 0; vUint32[${decoded.rd * 4}] = a; vUint32[${decoded.rd * 4 + 1}] = b; vUint32[${decoded.rd * 4 + 2}] = c; vUint32[${decoded.rd * 4 + 3}] = d; } // ${decoded.disassembly}`);
+          break;
+        }
+
+        case InstructionType.AND_VEC:
+        case InstructionType.ORR_VEC:
+        case InstructionType.EOR_VEC: {
+          const op = decoded.type === InstructionType.AND_VEC ? "&" : decoded.type === InstructionType.ORR_VEC ? "|" : "^";
+          lines.push(`${indent}vUint64[${decoded.rd * 2}] = vUint64[${decoded.rn * 2}] ${op} vUint64[${decoded.rm * 2}]; vUint64[${decoded.rd * 2 + 1}] = ${decoded.Q ? `vUint64[${decoded.rn * 2 + 1}] ${op} vUint64[${decoded.rm * 2 + 1}]` : "0n"}; // ${decoded.disassembly}`);
+          break;
+        }
+
+        case InstructionType.NOT_VEC: {
+          lines.push(`${indent}vUint64[${decoded.rd * 2}] = ~vUint64[${decoded.rn * 2}]; vUint64[${decoded.rd * 2 + 1}] = ${decoded.Q ? `~vUint64[${decoded.rn * 2 + 1}]` : "0n"}; // ${decoded.disassembly}`);
+          break;
+        }
+
         case InstructionType.DUP_GEN: {
           const maxL = decoded.Q ? 4 : 2;
           lines.push(`${indent}for (let i = 0; i < ${maxL}; i++) vUint32[${decoded.rd * 4} + i] = Number(x[${decoded.rn}] & 0xffffffffn); // ${decoded.disassembly}`);
+          break;
+        }
+
+        case InstructionType.DUP_ELEM: {
+          const maxL = decoded.Q ? 4 : 2;
+          lines.push(`${indent}{ const val = vUint32[${decoded.rn * 4 + decoded.lane}]; for (let i = 0; i < ${maxL}; i++) vUint32[${decoded.rd * 4} + i] = val; } // ${decoded.disassembly}`);
+          break;
+        }
+
+        case InstructionType.INS_GEN: {
+          lines.push(`${indent}vUint32[${decoded.rd * 4 + decoded.lane}] = Number(x[${decoded.rn}] & 0xffffffffn); // ${decoded.disassembly}`);
+          break;
+        }
+
+        case InstructionType.INS_ELEM: {
+          lines.push(`${indent}vUint32[${decoded.rd * 4 + decoded.dstLane}] = vUint32[${decoded.rn * 4 + decoded.srcLane}]; // ${decoded.disassembly}`);
           break;
         }
 

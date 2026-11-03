@@ -574,15 +574,21 @@ export class Arm2X86Translator {
         case InstructionType.FADD:
         case InstructionType.FSUB:
         case InstructionType.FMUL:
-        case InstructionType.FDIV: {
+        case InstructionType.FDIV:
+        case InstructionType.FMAX:
+        case InstructionType.FMIN:
+        case InstructionType.FNMUL: {
           const isD = decoded.isDouble;
           const op = decoded.type === InstructionType.FADD ? (isD ? "addsd" : "addss") :
                      decoded.type === InstructionType.FSUB ? (isD ? "subsd" : "subss") :
-                     decoded.type === InstructionType.FMUL ? (isD ? "mulsd" : "mulss") : (isD ? "divsd" : "divss");
+                     decoded.type === InstructionType.FMUL || decoded.type === InstructionType.FNMUL ? (isD ? "mulsd" : "mulss") :
+                     decoded.type === InstructionType.FDIV ? (isD ? "divsd" : "divss") :
+                     decoded.type === InstructionType.FMAX ? (isD ? "maxsd" : "maxss") : (isD ? "minsd" : "minss");
           const dXmm = `xmm${decoded.rd % 16}`;
           const nXmm = `xmm${decoded.rn % 16}`;
           const mXmm = `xmm${decoded.rm % 16}`;
-          x86Asm = `mov${isD ? "sd" : "ss"} ${dXmm}, ${nXmm} ; ${op} ${dXmm}, ${mXmm}`;
+          const negSuffix = decoded.type === InstructionType.FNMUL ? ` ; xorp${isD ? "d" : "s"} ${dXmm}, [rip + sign_mask]` : "";
+          x86Asm = `mov${isD ? "sd" : "ss"} ${dXmm}, ${nXmm} ; ${op} ${dXmm}, ${mXmm}${negSuffix}`;
           x86Bytes = [0xf3, 0x0f, 0x10, 0xc0];
           break;
         }
@@ -618,6 +624,13 @@ export class Arm2X86Translator {
           break;
         }
 
+        case InstructionType.FCVT: {
+          const op = decoded.dstDouble ? "cvtss2sd" : "cvtsd2ss";
+          x86Asm = `${op} xmm${decoded.rd % 16}, xmm${decoded.rn % 16}`;
+          x86Bytes = [0xf3, 0x0f, 0x5a, 0xc0];
+          break;
+        }
+
         case InstructionType.FMOV: {
           const isD = decoded.isDouble;
           const xmm = `xmm${decoded.rd % 16}`;
@@ -636,7 +649,8 @@ export class Arm2X86Translator {
           break;
         }
 
-        case InstructionType.SCVTF: {
+        case InstructionType.SCVTF:
+        case InstructionType.UCVTF: {
           const isD = decoded.isDouble;
           const op = isD ? "cvtsi2sd" : "cvtsi2ss";
           const gpr = decoded.sf === 1 ? this.reg(decoded.rn) : this.reg32(decoded.rn);
@@ -645,7 +659,8 @@ export class Arm2X86Translator {
           break;
         }
 
-        case InstructionType.FCVTZS: {
+        case InstructionType.FCVTZS:
+        case InstructionType.FCVTZU: {
           const isD = decoded.isDouble;
           const op = isD ? "cvttsd2si" : "cvttss2si";
           const gpr = decoded.sf === 1 ? this.reg(decoded.rd) : this.reg32(decoded.rd);
@@ -680,19 +695,53 @@ export class Arm2X86Translator {
           break;
         }
 
+        case InstructionType.LDP_FREG:
+        case InstructionType.STP_FREG:
+        case InstructionType.LDP_VREG:
+        case InstructionType.STP_VREG: {
+          const isQuad = decoded.type === InstructionType.LDP_VREG || decoded.type === InstructionType.STP_VREG;
+          const isLoad = decoded.type === InstructionType.LDP_FREG || decoded.type === InstructionType.LDP_VREG;
+          const op = isQuad ? "movdqu" : (decoded.isDouble ? "movsd" : "movss");
+          const step = isQuad ? 16 : (decoded.isDouble ? 8 : 4);
+          const x1 = `xmm${decoded.rt1 % 16}`;
+          const x2 = `xmm${decoded.rt2 % 16}`;
+          const rn = this.reg(decoded.rn);
+          const off = decoded.offsetBytes || 0;
+          x86Asm = isLoad
+            ? `${op} ${x1}, [${rn}+${off}] ; ${op} ${x2}, [${rn}+${off + step}]`
+            : `${op} [${rn}+${off}], ${x1} ; ${op} [${rn}+${off + step}], ${x2}`;
+          x86Bytes = [0xf3, 0x0f, 0x6f, 0x04, 0x24];
+          break;
+        }
+
         case InstructionType.FADD_VEC:
         case InstructionType.FSUB_VEC:
         case InstructionType.FMUL_VEC:
-        case InstructionType.FDIV_VEC: {
+        case InstructionType.FDIV_VEC:
+        case InstructionType.FMAX_VEC:
+        case InstructionType.FMIN_VEC: {
           const isD = decoded.isDouble;
           const op = decoded.type === InstructionType.FADD_VEC ? (isD ? "addpd" : "addps") :
                      decoded.type === InstructionType.FSUB_VEC ? (isD ? "subpd" : "subps") :
-                     decoded.type === InstructionType.FMUL_VEC ? (isD ? "mulpd" : "mulps") : (isD ? "divpd" : "divps");
+                     decoded.type === InstructionType.FMUL_VEC ? (isD ? "mulpd" : "mulps") :
+                     decoded.type === InstructionType.FDIV_VEC ? (isD ? "divpd" : "divps") :
+                     decoded.type === InstructionType.FMAX_VEC ? (isD ? "maxpd" : "maxps") : (isD ? "minpd" : "minps");
           const dXmm = `xmm${decoded.rd % 16}`;
           const nXmm = `xmm${decoded.rn % 16}`;
           const mXmm = `xmm${decoded.rm % 16}`;
           x86Asm = `movaps ${dXmm}, ${nXmm} ; ${op} ${dXmm}, ${mXmm}`;
           x86Bytes = [0x0f, 0x28, 0xc0, 0x0f, 0x58, 0xc0];
+          break;
+        }
+
+        case InstructionType.FNEG_VEC:
+        case InstructionType.FABS_VEC: {
+          const isD = decoded.isDouble;
+          const op = decoded.type === InstructionType.FNEG_VEC ? (isD ? "xorpd" : "xorps") : (isD ? "andpd" : "andps");
+          const dXmm = `xmm${decoded.rd % 16}`;
+          const nXmm = `xmm${decoded.rn % 16}`;
+          x86Asm = `movaps ${dXmm}, ${nXmm} ; ${op} ${dXmm}, [rip + ${decoded.type === InstructionType.FNEG_VEC ? "vec_sign_mask" : "vec_abs_mask"}]`;
+          x86Bytes = [0x0f, 0x28, 0xc0, 0x0f, 0x57, 0xc0];
           break;
         }
 
@@ -709,9 +758,11 @@ export class Arm2X86Translator {
 
         case InstructionType.ADD_VEC:
         case InstructionType.SUB_VEC:
-        case InstructionType.MUL_VEC: {
+        case InstructionType.MUL_VEC:
+        case InstructionType.ADDP_VEC: {
           const op = decoded.type === InstructionType.ADD_VEC ? "paddd" :
-                     decoded.type === InstructionType.SUB_VEC ? "psubd" : "pmulld";
+                     decoded.type === InstructionType.SUB_VEC ? "psubd" :
+                     decoded.type === InstructionType.MUL_VEC ? "pmulld" : "phaddd";
           const dXmm = `xmm${decoded.rd % 16}`;
           const nXmm = `xmm${decoded.rn % 16}`;
           const mXmm = `xmm${decoded.rm % 16}`;
@@ -733,11 +784,45 @@ export class Arm2X86Translator {
           break;
         }
 
+        case InstructionType.NOT_VEC: {
+          const dXmm = `xmm${decoded.rd % 16}`;
+          const nXmm = `xmm${decoded.rn % 16}`;
+          x86Asm = `movdqa ${dXmm}, ${nXmm} ; pxor ${dXmm}, [rip + vec_all_ones]`;
+          x86Bytes = [0x66, 0x0f, 0xef, 0xc0];
+          break;
+        }
+
         case InstructionType.DUP_GEN: {
           const xmm = `xmm${decoded.rd % 16}`;
           const gpr = decoded.elemSize === 3 ? this.reg(decoded.rn) : this.reg32(decoded.rn);
           x86Asm = `movd ${xmm}, ${gpr} ; pshufd ${xmm}, ${xmm}, 0x00`;
           x86Bytes = [0x66, 0x0f, 0x6e, 0xc0, 0x66, 0x0f, 0x70, 0xc0, 0x00];
+          break;
+        }
+
+        case InstructionType.DUP_ELEM: {
+          const dXmm = `xmm${decoded.rd % 16}`;
+          const nXmm = `xmm${decoded.rn % 16}`;
+          const shuf = ((decoded.lane & 3) * 0x55) & 0xff;
+          x86Asm = `pshufd ${dXmm}, ${nXmm}, 0x${shuf.toString(16).padStart(2, "0")}`;
+          x86Bytes = [0x66, 0x0f, 0x70, 0xc0, shuf];
+          break;
+        }
+
+        case InstructionType.INS_GEN: {
+          const dXmm = `xmm${decoded.rd % 16}`;
+          const gpr = decoded.elemSize === 3 ? this.reg(decoded.rn) : this.reg32(decoded.rn);
+          x86Asm = `pinsrd ${dXmm}, ${gpr}, ${decoded.lane}`;
+          x86Bytes = [0x66, 0x0f, 0x3a, 0x22, 0xc0, decoded.lane & 0xff];
+          break;
+        }
+
+        case InstructionType.INS_ELEM: {
+          const dXmm = `xmm${decoded.rd % 16}`;
+          const nXmm = `xmm${decoded.rn % 16}`;
+          const imm = ((decoded.srcLane & 3) << 6) | ((decoded.dstLane & 3) << 4);
+          x86Asm = `insertps ${dXmm}, ${nXmm}, 0x${imm.toString(16).padStart(2, "0")}`;
+          x86Bytes = [0x66, 0x0f, 0x3a, 0x21, 0xc0, imm];
           break;
         }
 

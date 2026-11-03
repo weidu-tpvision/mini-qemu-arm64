@@ -141,8 +141,30 @@ export class CPU {
   setVRegBytes(index, srcBytes) {
     if (index < 0 || index > 31) throw new Error(`Invalid vector register index: ${index}`);
     const offset = index * 16;
-    for (let i = 0; i < Math.min(16, srcBytes.length); i++) {
+    const len = Math.min(16, srcBytes.length);
+    for (let i = 0; i < len; i++) {
       this.vBytes[offset + i] = srcBytes[i];
+    }
+    // Zero remaining upper bytes (e.g. 64-bit 8B vector writes zero bits [127:64])
+    for (let i = len; i < 16; i++) {
+      this.vBytes[offset + i] = 0;
+    }
+  }
+
+  getVRegInt16(index, lanes = 8) {
+    if (index < 0 || index > 31) throw new Error(`Invalid vector register index: ${index}`);
+    const base = index * 8;
+    return this.vInt16.subarray(base, base + lanes);
+  }
+
+  setVRegInt16(index, values, lanes = 8) {
+    if (index < 0 || index > 31) throw new Error(`Invalid vector register index: ${index}`);
+    const base = index * 8;
+    for (let i = 0; i < lanes; i++) {
+      this.vInt16[base + i] = values[i] | 0;
+    }
+    if (lanes === 4) {
+      this.vUint64[index * 2 + 1] = 0n;
     }
   }
 
@@ -156,7 +178,7 @@ export class CPU {
     if (index < 0 || index > 31) throw new Error(`Invalid vector register index: ${index}`);
     const base = index * 4;
     for (let i = 0; i < lanes; i++) {
-      this.vFloat32[base + i] = Number(values[i] || 0);
+      this.vFloat32[base + i] = values[i] !== undefined ? Number(values[i]) : 0;
     }
     if (lanes === 2) {
       // 64-bit vector (2S): zero upper 64 bits
@@ -174,7 +196,7 @@ export class CPU {
     if (index < 0 || index > 31) throw new Error(`Invalid vector register index: ${index}`);
     const base = index * 2;
     for (let i = 0; i < lanes; i++) {
-      this.vFloat64[base + i] = Number(values[i] || 0);
+      this.vFloat64[base + i] = values[i] !== undefined ? Number(values[i]) : 0;
     }
     if (lanes === 1) {
       this.vUint64[index * 2 + 1] = 0n;
@@ -292,7 +314,9 @@ export class CPU {
         s: this.getFRegSingle(i),
         bits64: this.getFRegBits64(i),
         f32x4: Array.from(this.getVRegFloat32(i, 4)),
-        u32x4: Array.from(this.getVRegUint32(i, 4))
+        f64x2: Array.from(this.getVRegFloat64(i, 2)),
+        u32x4: Array.from(this.getVRegUint32(i, 4)),
+        u64x2: Array.from(this.getVRegUint64(i, 2))
       });
     }
     return {

@@ -183,4 +183,73 @@ console.log("Running Floating-Point & NEON SIMD Unit Tests...\n");
   console.log("[PASS] Arm2X86Translator translates neon_matrix.elf to x86-64 SSE with 0 untranslated instructions");
 }
 
+// 8. Test Edge Cases: NaN/-0.0, FCVTZS Saturation, FMOV #imm8, FSUB_VEC/FABS_VEC/2D, Q=0 Zeroing & INS_ELEM
+{
+  const emu = new MiniQEMU();
+
+  // (a) NaN and -0.0 preservation in setVRegFloat32 / setVRegFloat64
+  emu.cpu.setVRegFloat32(5, [NaN, -0.0, 1.5, -2.5]);
+  const v5 = emu.cpu.getVRegFloat32(5, 4);
+  assert.ok(Number.isNaN(v5[0]), "setVRegFloat32 must preserve NaN");
+  assert.ok(Object.is(v5[1], -0.0), "setVRegFloat32 must preserve -0.0");
+
+  // (b) FCVTZS / FCVTZU saturation on NaN and +-Infinity
+  emu.cpu.setFRegDouble(0, NaN);
+  emu.loadProgram([0x9e780002], 0x00400000); // fcvtzs x2, d0
+  emu.step(false);
+  assert.strictEqual(emu.cpu.getReg(2), 0n, "FCVTZS on NaN must return 0");
+
+  emu.cpu.setFRegDouble(0, Infinity);
+  emu.loadProgram([0x9e780002], 0x00400000); // fcvtzs x2, d0
+  emu.step(false);
+  assert.strictEqual(emu.cpu.getReg(2), 0x7fffffffffffffffn, "FCVTZS on +Infinity must saturate to INT64_MAX");
+
+  // (c) FMOV #imm8 with bit 1 of imm8 (bit 14 of raw instruction) set: imm8 = 0x72 -> 1.125
+  const fmovImm1125 = 0x1e601000 | (0x72 << 13) | 0; // fmov d0, #1.125
+  const decImm = Decoder.decode(fmovImm1125);
+  assert.strictEqual(decImm.type, InstructionType.FMOV, "FMOV #1.125 must decode as FMOV");
+  assert.strictEqual(decImm.immValue, 1.125, "FMOV #1.125 immediate value must be 1.125");
+
+  // (d) FSUB_VEC 4S, FABS_VEC 4S, FNEG_VEC 4S, and FADD_VEC 2D
+  emu.cpu.setVRegFloat32(1, [10.0, 20.0, 30.0, 40.0]);
+  emu.cpu.setVRegFloat32(2, [1.0, 2.0, 3.0, 4.0]);
+  emu.loadProgram([0x4ea2d420], 0x00400000); // fsub v0.4s, v1.4s, v2.4s
+  const stepSub = emu.step(false);
+  assert.deepStrictEqual(Array.from(emu.cpu.getVRegFloat32(0, 4)), [9.0, 18.0, 27.0, 36.0], "FSUB v0.4s must subtract all 4 lanes");
+  assert.ok(stepSub.changedFRegs.includes(0), "stepResult.changedFRegs must track mutated V0");
+
+  // fneg v3.4s, v0.4s (0x6ea0f803) and fabs v4.4s, v3.4s (0x4ea0f864)
+  emu.loadProgram([0x6ea0f803, 0x4ea0f864], 0x00400000);
+  emu.step(false);
+  assert.deepStrictEqual(Array.from(emu.cpu.getVRegFloat32(3, 4)), [-9.0, -18.0, -27.0, -36.0], "FNEG v3.4s must negate all 4 lanes");
+  emu.step(false);
+  assert.deepStrictEqual(Array.from(emu.cpu.getVRegFloat32(4, 4)), [9.0, 18.0, 27.0, 36.0], "FABS v4.4s must take abs of all 4 lanes");
+
+  // fadd v0.2d, v1.2d, v2.2d (0x4e62d420)
+  emu.cpu.setVRegFloat64(1, [100.5, 200.25]);
+  emu.cpu.setVRegFloat64(2, [0.5, 0.75]);
+  emu.loadProgram([0x4e62d420], 0x00400000);
+  emu.step(false);
+  assert.deepStrictEqual(Array.from(emu.cpu.getVRegFloat64(0, 2)), [101.0, 201.0], "FADD v0.2d must add 2 double-precision lanes");
+
+  // (e) Q=0 (64-bit vector) upper-64-bit zeroing on bitwise NOT (mvn v0.8b, v1.8b -> 0x2e205820)
+  emu.cpu.vUint64[0] = 0xffffffffffffffffn;
+  emu.cpu.vUint64[1] = 0xffffffffffffffffn;
+  emu.cpu.vUint64[2] = 0x00ff00ff00ff00ffn; // v1 low 64
+  emu.loadProgram([0x2e205820], 0x00400000); // mvn v0.8b, v1.8b
+  emu.step(false);
+  assert.strictEqual(emu.cpu.vUint64[0], 0xff00ff00ff00ff00n, "mvn v0.8b low 64 bits must be inverted");
+  assert.strictEqual(emu.cpu.vUint64[1], 0n, "mvn v0.8b upper 64 bits must be zeroed when Q=0");
+
+  // (f) INS_ELEM: ins v0.s[2], v1.s[1] (Q=1, op=1, imm5=0b10100 (20), imm4=0b0100 (4))
+  const insElemInstr = 0x6e000400 | (20 << 16) | (4 << 11) | (1 << 5) | 0;
+  emu.cpu.setVRegUint32(0, [10, 20, 30, 40]);
+  emu.cpu.setVRegUint32(1, [111, 222, 333, 444]);
+  emu.loadProgram([insElemInstr], 0x00400000);
+  emu.step(false);
+  assert.deepStrictEqual(Array.from(emu.cpu.getVRegUint32(0, 4)), [10, 20, 222, 40], "INS v0.s[2], v1.s[1] must copy lane 1 to lane 2");
+
+  console.log("[PASS] Edge cases (NaN/-0.0, FCVTZS saturation, FMOV #imm8, FSUB/FABS/2D, Q=0 zeroing & INS_ELEM) verified");
+}
+
 console.log("\nAll Floating-Point & NEON SIMD Tests Passed Successfully!");

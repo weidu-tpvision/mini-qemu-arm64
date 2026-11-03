@@ -405,6 +405,7 @@ export class MiniQEMU {
 
     const currentPC = Number(this.cpu.pc);
     const prevRegs = Array.from(this.cpu.x);
+    const prevV64 = new BigUint64Array(this.cpu.vUint64);
     const prevSP = this.cpu.sp;
     this.memory.lastWritten.clear();
 
@@ -1323,9 +1324,19 @@ export class MiniQEMU {
       case InstructionType.FCVTZS: {
         const isD = decoded.isDouble;
         const v = isD ? this.cpu.getFRegDouble(decoded.rn) : this.cpu.getFRegSingle(decoded.rn);
-        const truncated = Math.trunc(v);
         const bits = decoded.sf === 0 ? 32 : 64;
-        this.cpu.setReg(decoded.rd, BigInt.asUintN(bits, BigInt(truncated)));
+        let res = 0n;
+        if (!Number.isNaN(v)) {
+          const maxInt = (1n << BigInt(bits - 1)) - 1n;
+          const minInt = -(1n << BigInt(bits - 1));
+          if (!Number.isFinite(v)) {
+            res = v > 0 ? maxInt : minInt;
+          } else {
+            const bigV = BigInt(Math.trunc(v));
+            res = bigV > maxInt ? maxInt : (bigV < minInt ? minInt : bigV);
+          }
+        }
+        this.cpu.setReg(decoded.rd, BigInt.asUintN(bits, res));
         this.cpu.pc += 4n;
         break;
       }
@@ -1333,9 +1344,18 @@ export class MiniQEMU {
       case InstructionType.FCVTZU: {
         const isD = decoded.isDouble;
         const v = isD ? this.cpu.getFRegDouble(decoded.rn) : this.cpu.getFRegSingle(decoded.rn);
-        const truncated = Math.max(0, Math.trunc(v));
         const bits = decoded.sf === 0 ? 32 : 64;
-        this.cpu.setReg(decoded.rd, BigInt.asUintN(bits, BigInt(truncated)));
+        let res = 0n;
+        if (!Number.isNaN(v) && v > 0) {
+          const maxUint = (1n << BigInt(bits)) - 1n;
+          if (!Number.isFinite(v)) {
+            res = maxUint;
+          } else {
+            const bigV = BigInt(Math.trunc(v));
+            res = bigV > maxUint ? maxUint : bigV;
+          }
+        }
+        this.cpu.setReg(decoded.rd, BigInt.asUintN(bits, res));
         this.cpu.pc += 4n;
         break;
       }
@@ -1588,7 +1608,17 @@ export class MiniQEMU {
       case InstructionType.SUB_VEC:
       case InstructionType.MUL_VEC: {
         const lanes = decoded.lanes;
-        if (decoded.size === 2) { // 32-bit int
+        if (decoded.size === 3) { // 64-bit int (1D / 2D)
+          const v1 = this.cpu.getVRegUint64(decoded.rn, lanes);
+          const v2 = this.cpu.getVRegUint64(decoded.rm, lanes);
+          const out = new BigUint64Array(lanes);
+          for (let i = 0; i < lanes; i++) {
+            if (decoded.type === InstructionType.ADD_VEC) out[i] = BigInt.asUintN(64, v1[i] + v2[i]);
+            else if (decoded.type === InstructionType.SUB_VEC) out[i] = BigInt.asUintN(64, v1[i] - v2[i]);
+            else out[i] = BigInt.asUintN(64, v1[i] * v2[i]);
+          }
+          this.cpu.setVRegUint64(decoded.rd, out, lanes);
+        } else if (decoded.size === 2) { // 32-bit int (2S / 4S)
           const v1 = this.cpu.getVRegInt32(decoded.rn, lanes);
           const v2 = this.cpu.getVRegInt32(decoded.rm, lanes);
           const out = new Int32Array(lanes);
@@ -1598,12 +1628,22 @@ export class MiniQEMU {
             else out[i] = Math.imul(v1[i], v2[i]);
           }
           this.cpu.setVRegInt32(decoded.rd, out, lanes);
+        } else if (decoded.size === 1) { // 16-bit int (4H / 8H)
+          const v1 = this.cpu.getVRegInt16(decoded.rn, lanes);
+          const v2 = this.cpu.getVRegInt16(decoded.rm, lanes);
+          const out = new Int16Array(lanes);
+          for (let i = 0; i < lanes; i++) {
+            if (decoded.type === InstructionType.ADD_VEC) out[i] = (v1[i] + v2[i]) & 0xffff;
+            else if (decoded.type === InstructionType.SUB_VEC) out[i] = (v1[i] - v2[i]) & 0xffff;
+            else out[i] = (v1[i] * v2[i]) & 0xffff;
+          }
+          this.cpu.setVRegInt16(decoded.rd, out, lanes);
         } else {
-          // Byte-level default
+          // 8-bit byte (8B / 16B)
           const b1 = this.cpu.getVRegBytes(decoded.rn);
           const b2 = this.cpu.getVRegBytes(decoded.rm);
-          const out = new Uint8Array(16);
           const maxL = decoded.Q ? 16 : 8;
+          const out = new Uint8Array(maxL);
           for (let i = 0; i < maxL; i++) {
             if (decoded.type === InstructionType.ADD_VEC) out[i] = (b1[i] + b2[i]) & 0xff;
             else if (decoded.type === InstructionType.SUB_VEC) out[i] = (b1[i] - b2[i]) & 0xff;
@@ -1617,7 +1657,18 @@ export class MiniQEMU {
 
       case InstructionType.ADDP_VEC: {
         const lanes = decoded.lanes;
-        if (decoded.size === 2) {
+        if (decoded.size === 3) {
+          const v1 = this.cpu.getVRegUint64(decoded.rn, lanes);
+          const v2 = this.cpu.getVRegUint64(decoded.rm, lanes);
+          const out = new BigUint64Array(lanes);
+          if (lanes === 2) {
+            out[0] = BigInt.asUintN(64, v1[0] + v1[1]);
+            out[1] = BigInt.asUintN(64, v2[0] + v2[1]);
+          } else {
+            out[0] = BigInt.asUintN(64, v1[0] + v2[0]);
+          }
+          this.cpu.setVRegUint64(decoded.rd, out, lanes);
+        } else if (decoded.size === 2) {
           const v1 = this.cpu.getVRegInt32(decoded.rn, lanes);
           const v2 = this.cpu.getVRegInt32(decoded.rm, lanes);
           const out = new Int32Array(lanes);
@@ -1631,6 +1682,27 @@ export class MiniQEMU {
             out[1] = v2[0] + v2[1];
           }
           this.cpu.setVRegInt32(decoded.rd, out, lanes);
+        } else if (decoded.size === 1) {
+          const v1 = this.cpu.getVRegInt16(decoded.rn, lanes);
+          const v2 = this.cpu.getVRegInt16(decoded.rm, lanes);
+          const out = new Int16Array(lanes);
+          const half = lanes >> 1;
+          for (let i = 0; i < half; i++) {
+            out[i] = (v1[i * 2] + v1[i * 2 + 1]) & 0xffff;
+            out[half + i] = (v2[i * 2] + v2[i * 2 + 1]) & 0xffff;
+          }
+          this.cpu.setVRegInt16(decoded.rd, out, lanes);
+        } else {
+          const b1 = this.cpu.getVRegBytes(decoded.rn);
+          const b2 = this.cpu.getVRegBytes(decoded.rm);
+          const maxL = decoded.Q ? 16 : 8;
+          const out = new Uint8Array(maxL);
+          const half = maxL >> 1;
+          for (let i = 0; i < half; i++) {
+            out[i] = (b1[i * 2] + b1[i * 2 + 1]) & 0xff;
+            out[half + i] = (b2[i * 2] + b2[i * 2 + 1]) & 0xff;
+          }
+          this.cpu.setVRegBytes(decoded.rd, out);
         }
         this.cpu.pc += 4n;
         break;
@@ -1642,8 +1714,9 @@ export class MiniQEMU {
       case InstructionType.NOT_VEC: {
         const b1 = this.cpu.getVRegBytes(decoded.rn);
         const b2 = decoded.rm !== undefined ? this.cpu.getVRegBytes(decoded.rm) : null;
-        const out = new Uint8Array(16);
-        for (let i = 0; i < 16; i++) {
+        const maxL = decoded.Q ? 16 : 8;
+        const out = new Uint8Array(maxL);
+        for (let i = 0; i < maxL; i++) {
           if (decoded.type === InstructionType.AND_VEC) out[i] = b1[i] & b2[i];
           else if (decoded.type === InstructionType.ORR_VEC) out[i] = b1[i] | b2[i];
           else if (decoded.type === InstructionType.EOR_VEC) out[i] = b1[i] ^ b2[i];
@@ -1688,6 +1761,13 @@ export class MiniQEMU {
         break;
       }
 
+      case InstructionType.INS_ELEM: {
+        const elemVal = this.cpu.getVRegLane(decoded.rn, decoded.elemSize, decoded.srcLane);
+        this.cpu.setVRegLane(decoded.rd, decoded.elemSize, decoded.dstLane, elemVal);
+        this.cpu.pc += 4n;
+        break;
+      }
+
       case InstructionType.UMOV_ELEM: {
         const laneVal = this.cpu.getVRegLane(decoded.rn, decoded.elemSize, decoded.lane);
         this.cpu.setReg(decoded.rd, BigInt(laneVal));
@@ -1710,6 +1790,12 @@ export class MiniQEMU {
     if (this.cpu.sp !== prevSP) {
       changedRegs.push({ index: 31, name: "SP", val: this.cpu.sp, prev: prevSP });
     }
+    const changedFRegs = [];
+    for (let i = 0; i < 32; i++) {
+      if (this.cpu.vUint64[i * 2] !== prevV64[i * 2] || this.cpu.vUint64[i * 2 + 1] !== prevV64[i * 2 + 1]) {
+        changedFRegs.push(i);
+      }
+    }
 
     const nextPC = Number(this.cpu.pc);
     const stepResult = {
@@ -1723,6 +1809,7 @@ export class MiniQEMU {
       disassembly: decoded.disassembly,
       flags: { ...this.cpu.flags },
       changedRegs,
+      changedFRegs,
       changedMem: Array.from(this.memory.lastWritten),
       halted: this.cpu.halted,
       yielded: isYield,

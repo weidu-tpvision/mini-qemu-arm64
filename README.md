@@ -72,7 +72,10 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 
 ---
 
-## Supported Instruction Set (48+ Core Instructions, 32-bit `W` & 64-bit `X` Widths)
+## Supported Instruction Set (75+ Core Instructions: Integer, Memory, Float & NEON SIMD)
+
+> [!TIP]
+> **Complete Instruction Architecture Reference:** For exhaustive bitfield encodings, IEEE-754 semantics, addressing modes, condition code truth tables, and AOT/x86 translation mappings, see **[instructions.md](instructions.md)** (or **[docs/instructions.md](docs/instructions.md)**).
 
 | Category | Instructions | Description & Semantics |
 | :--- | :--- | :--- |
@@ -103,6 +106,22 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 | | `RET` | Return from subroutine to address in `LR` (`X30`) |
 | **System & TLS** | `SVC` | Supervisor Call (Linux system call trap) |
 | | `MRS`, `MSR` | Read/Write Thread Pointer (`TPIDR_EL0`) and system registers |
+| **Scalar Float (VFP)** | `FADD`, `FSUB`, `FMUL`, `FDIV` | Single (`S0`–`S31`) and Double (`D0`–`D31`) IEEE-754 basic arithmetic |
+| | `FNMUL`, `FNEG`, `FABS` | Floating-point negated multiply, sign inversion, and absolute value |
+| | `FSQRT`, `FMAX`, `FMIN` | Hardware square root, IEEE-754 max and min |
+| | `FCMP` | Floating-point compare updating `NZCV` flags (including NaN unordered) |
+| | `SCVTF`, `UCVTF` | Signed / Unsigned integer to Floating-point conversion |
+| | `FCVTZS`, `FCVTZU` | Floating-point to Signed / Unsigned integer truncation |
+| | `FCVT`, `FMOV` | Single $\leftrightarrow$ Double conversion, float immediate, and GPR $\leftrightarrow$ FPR bitcasts |
+| **NEON Advanced SIMD** | `FADD_VEC`, `FSUB_VEC`, `FMUL_VEC`, `FDIV_VEC` | 128-bit packed vector float math (`4S` / 4×Float32, `2D` / 2×Float64) |
+| | `FADDP_VEC` | Pairwise floating-point vector addition reduction |
+| | `FMAX_VEC`, `FMIN_VEC`, `FNEG_VEC`, `FABS_VEC` | Vector floating-point extrema and sign operations |
+| | `ADD_VEC`, `SUB_VEC`, `MUL_VEC`, `ADDP_VEC` | 128-bit packed vector integer arithmetic and pairwise reduction |
+| | `AND_VEC`, `ORR_VEC`, `EOR_VEC`, `NOT_VEC` | 128-bit vector bitwise logical operations |
+| | `DUP` (gen/elem), `INS`, `UMOV` | Vector splat, lane insertion, and extraction to GPR |
+| **Vector & FP Memory** | `LDR` / `STR` (FPR) | Load and store scalar single/double floating-point registers |
+| | `LDR` / `STR` (VPR) | Load and store full 128-bit `Q0`–`Q31` vector registers |
+| | `LDP` / `STP` (FPR/VPR) | Load/Store pair of floating-point and vector registers |
 
 ---
 
@@ -156,11 +175,15 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 ├── docs/                          # Educational Guides & Architecture Docs
 │   ├── ui_preview.svg             # High-resolution vector preview of the Web UI
 │   ├── ui_preview.png             # Raster PNG preview of the Web UI
-│   ├── learning.md                # Comprehensive emulator fundamentals & 5 case studies
-│   ├── plan.md                    # 6-phase architectural roadmap & verification matrix
+│   ├── instructions.md            # Comprehensive ARM64 instruction set reference (75+ instructions)
+│   ├── floating_point_and_neon_architecture.md # Deep dive on scalar VFP, 128-bit NEON & SIMD translation
+│   ├── dynamic_memory_architecture.md          # Deep dive on sys_brk, sys_mmap/munmap & allocators
+│   ├── graphics_architecture_and_emulation.md  # Deep dive on console graphics (PPU, Switch, PS5 & shaders)
+│   ├── static_linking_and_libc_architecture.md # Deep dive on static libc, system calls & Linux ABI
 │   ├── decoding_and_compilation.md# Deep dive on JIT vs. AOT, I/O thunking, recursion & PyTorch parallel
-│   ├── graphics_architecture_and_emulation.md # Deep dive on console graphics (PPU, Switch, PS5 & shader decompilation)
-│   └── static_linking_and_libc_architecture.md # Deep dive on static libc, system calls vs. library functions & Linux ABI
+│   ├── learning.md                # Comprehensive emulator fundamentals & 5 case studies
+│   └── plan.md                    # 6-phase architectural roadmap & verification matrix
+├── instructions.md                # Quick root link to docs/instructions.md
 ├── package.json                   # Project manifest and npm scripts
 └── README.md                      # This file
 ```
@@ -310,6 +333,11 @@ label_1_0x40000c:
 
 ## Documentation & Reading Guides
 
-* **[docs/learning.md](docs/learning.md):** The 4 paradigms of emulation (API compatibility layers, hardware virtualization, JIT binary translation, software interpretation) with case studies of the PS5, Nintendo Switch, Android Emulator, and QEMU.
-* **[docs/plan.md](docs/plan.md):** The original 5-phase implementation plan and test verification matrix.
+* **[instructions.md](instructions.md) / [docs/instructions.md](docs/instructions.md):** Comprehensive ARM64 instruction set architecture reference covering all 75+ instructions (Immediate, Register, Multiply/Divide, Bitfields, Single & Pair Loads/Stores, Branching, System/TLS, Scalar VFP Float, and 128-bit NEON SIMD) with bitfield patterns, IEEE-754 semantics, NZCV flag conditions, and AOT/x86 translations.
+* **[docs/floating_point_and_neon_architecture.md](docs/floating_point_and_neon_architecture.md):** Deep dive into the 32 128-bit vector/float register model (`V0`–`V31`), scalar Single/Double VFP math, IEEE-754 NaN/unordered comparisons, 128-bit NEON packed vector pipelines, and x86 SSE/AVX translation.
+* **[docs/dynamic_memory_architecture.md](docs/dynamic_memory_architecture.md):** Deep dive into Linux dynamic memory management (`sys_brk`, `sys_mmap`, `sys_munmap`), heap contraction, bump allocators, boundary-tag free-list coalescing, and live Web UI memory inspectors.
+* **[docs/graphics_architecture_and_emulation.md](docs/graphics_architecture_and_emulation.md):** Deep dive on console graphics (NES PPU, Nintendo Switch, PS5, shader decompilation), memory-mapped VRAM (`0x00800000`), MMIO gamepad/mouse input (`0x00850000`), and 60 FPS hardware VSync scheduling via `sys_sched_yield`.
+* **[docs/static_linking_and_libc_architecture.md](docs/static_linking_and_libc_architecture.md):** Deep dive on static libc (`musl` / `nolibc`), system calls vs. library functions, ELF program headers, and the Linux AArch64 process ABI stack frame.
 * **[docs/decoding_and_compilation.md](docs/decoding_and_compilation.md):** Why an interpreter simulates semantics without emitting host assembly, why offline static compilation encounters the computed goto / literal pool problems, how I/O syscall thunking and recursive stack frames work, and how this directly parallels PyTorch graph compilation (`torch.jit.trace` vs. `torch.compile`).
+* **[docs/learning.md](docs/learning.md):** The 4 paradigms of emulation (API compatibility layers, hardware virtualization, JIT binary translation, software interpretation) with case studies of the PS5, Nintendo Switch, Android Emulator, and QEMU.
+* **[docs/plan.md](docs/plan.md):** The original 5-phase architectural roadmap and test verification matrix.
