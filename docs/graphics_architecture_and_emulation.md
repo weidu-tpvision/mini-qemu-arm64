@@ -215,14 +215,30 @@ Trying to build a complete modern Vulkan shader decompiler on day one is overwhe
 
 ---
 
-## 5. Next Steps for Mini-QEMU
+## 5. Implemented Graphics & Interactive Input Architecture in Mini-QEMU
 
-Because **Mini-QEMU** already emulates 64-bit ARM64 (the exact architecture of the **Nintendo Switch**, modern smartphones, and Apple Silicon), we can immediately apply these principles:
+Because **Mini-QEMU** emulates 64-bit ARM64 (the architecture of the **Nintendo Switch**, modern smartphones, and Apple Silicon), it implements **Level 1 MMIO Display + Interactive Input + VSync Frame Yield**:
 
-1. **Step 1 (Level 1 MMIO Display):**
-   * Map a dedicated Video RAM range (e.g. `0x00800000` to `0x0084B000` for $320 \times 240$ at 32-bit RGBA).
-   * Add a `<canvas>` Display panel to the Web UI (`ui/index.html`).
-   * Write a freestanding guest C++ program (`guest/fractal.cpp` or `guest/plasma.cpp`) that calculates pixels using ARM64 `STRW` instructions.
-2. **Step 2 (Level 2 Command Queue):**
-   * Define a lightweight packet protocol (`CMD_CLEAR`, `CMD_DRAW_RECT`, `CMD_BLIT`) in guest memory.
-   * Allow the guest program to submit draw queues, demonstrating how console graphics drivers decouple CPU logic from rendering.
+1. **Level 1 MMIO Framebuffer (`0x00800000` – `0x0084B000`):**
+   * Maps a dedicated 300 KB Video RAM region for a $320 \times 240$ display at 32-bit RGBA (`0xAABBGGRR` Little-Endian byte order).
+   * Tracks dirty VRAM writes (`vramDirty`) and blits directly into the HTML5 `<canvas>` (`ui/index.html`) with an optional CRT scanline overlay and live pixel coordinate/MMIO address probe.
+   * **Guest Demos:**
+     * `bin/graphics_pattern.elf` ([`guest/graphics_demo.cpp`](file:///C:/Users/wei.du/WorkAtTPVision/test/emulator/guest/graphics_demo.cpp)): Renders SMPTE television color bars, an RGB XOR mathematical fractal plasma, and a luma ramp.
+     * `bin/plasma.elf` ([`guest/plasma.cpp`](file:///C:/Users/wei.du/WorkAtTPVision/test/emulator/guest/plasma.cpp)): Renders a colorful 2D mathematical interference wave pattern and writes an ASCII art preview to `stdout`.
+
+2. **MMIO Interactive Input Peripheral (`0x00850000` – `0x00850014`) & VSync Yield (`syscall 124`):**
+   * Maps hardware input registers at `0x00850000`:
+     * `0x00850000` (`INPUT_REG_KEY_STATE`): Live button bitmask (`Bit 0: UP`, `Bit 1: DOWN`, `Bit 2: LEFT`, `Bit 3: RIGHT`, `Bit 4: ACTION_A / Paint`, `Bit 5: ACTION_B / Color`, `Bit 6: RESET / Clear`, `Bit 7: EXIT`).
+     * `0x00850004` (`INPUT_REG_LAST_KEY`): Last key ASCII/keyCode pressed.
+     * `0x00850008` (`INPUT_REG_POINTER_X`): Mouse pointer X coordinate ($0 \dots 319$).
+     * `0x0085000C` (`INPUT_REG_POINTER_Y`): Mouse pointer Y coordinate ($0 \dots 239$).
+     * `0x00850010` (`INPUT_REG_POINTER_BTN`): Mouse button bitmask (`Bit 0`: Left button pressed).
+     * `0x00850014` (`INPUT_REG_FRAME_COUNT`): VSync frame counter incremented on every `sys_sched_yield`.
+   * **VSync Frame Synchronization (`sys_sched_yield`, `X8 = 124`):**
+     * Interactive guest binaries execute an event loop that polls `0x00850000`, updates VRAM at `0x00800000`, and invokes `svc #0` with `x8 = 124`.
+     * The emulator traps `syscall 124`, increments `INPUT_REG_FRAME_COUNT`, and sets `yielded = true` so the browser's `requestAnimationFrame` loop renders each frame smoothly at 60 FPS and samples fresh keyboard/mouse/D-Pad inputs before resuming the next frame.
+   * **Interactive Guest Demo:**
+     * `bin/interactive_paint.elf` ([`guest/interactive_paint.cpp`](file:///C:/Users/wei.du/WorkAtTPVision/test/emulator/guest/interactive_paint.cpp)): A 60 FPS bare-metal ARM64 interactive pixel painter with non-destructive cursor save/restore, rising-edge palette cycling, canvas reset, and mouse direct-draw support.
+
+3. **Future Step (Level 2 Command Queue):**
+   * Define a lightweight packet protocol (`CMD_CLEAR`, `CMD_DRAW_RECT`, `CMD_BLIT`) in guest memory so guest programs can submit asynchronous draw queues.

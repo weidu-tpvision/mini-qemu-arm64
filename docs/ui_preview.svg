@@ -370,6 +370,35 @@
         <rect x="0" y="0" width="320" height="140" fill="none" stroke="#243048" stroke-width="2" rx="4"/>
       </g>
       <text x="20" y="520" fill="#94a3b8" font-size="9.5">Hover: (140, 40) → 0x0080C88C • RGBA(0, 255, 0, 255) #00FF00</text>
+
+      <!-- Interactive Input Controller (0x00850000) Preview -->
+      <rect x="20" y="534" width="320" height="142" fill="#0f1523" stroke="#243048" rx="6"/>
+      <text x="32" y="552" fill="#94a3b8" font-size="9" font-weight="bold">MMIO INPUT CONTROLLER (0x00850000)</text>
+      <text x="328" y="552" fill="#38bdf8" font-size="8.5" text-anchor="end">🎮 Keyboard / Pointer Ready</text>
+
+      <!-- Virtual D-Pad -->
+      <g transform="translate(46, 564)">
+        <rect x="28" y="0" width="24" height="24" rx="4" fill="#161f33" stroke="#243048"/>
+        <text x="40" y="16" fill="#e2e8f0" font-size="9" text-anchor="middle">▲</text>
+        <rect x="0" y="28" width="24" height="24" rx="4" fill="#161f33" stroke="#243048"/>
+        <text x="12" y="44" fill="#e2e8f0" font-size="9" text-anchor="middle">◀</text>
+        <rect x="28" y="28" width="24" height="24" rx="4" fill="#161f33" stroke="#243048"/>
+        <text x="40" y="44" fill="#e2e8f0" font-size="9" text-anchor="middle">▼</text>
+        <rect x="56" y="28" width="24" height="24" rx="4" fill="#161f33" stroke="#06b6d4"/>
+        <text x="68" y="44" fill="#38bdf8" font-size="9" text-anchor="middle">▶</text>
+      </g>
+
+      <!-- Action Buttons -->
+      <g transform="translate(162, 578)">
+        <rect x="0" y="0" width="48" height="28" rx="5" fill="rgba(6, 182, 212, 0.15)" stroke="#06b6d4"/>
+        <text x="24" y="18" fill="#38bdf8" font-size="8.5" font-weight="bold" text-anchor="middle">[A] Paint</text>
+        <rect x="54" y="0" width="48" height="28" rx="5" fill="#161f33" stroke="#243048"/>
+        <text x="78" y="18" fill="#e2e8f0" font-size="8.5" font-weight="bold" text-anchor="middle">[B] Color</text>
+        <rect x="108" y="0" width="48" height="28" rx="5" fill="#161f33" stroke="#243048"/>
+        <text x="132" y="18" fill="#e2e8f0" font-size="8.5" font-weight="bold" text-anchor="middle">[R] Clear</text>
+      </g>
+
+      <text x="32" y="662" fill="#64748b" font-size="8.5">WASD/Arrows: Move • Space/Click: Paint • Shift/C: Color • R: Clear</text>
     </g>
   </g>
 </svg>

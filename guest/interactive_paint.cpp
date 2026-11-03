@@ -1,10 +1,10 @@
 // guest/interactive_paint.cpp - Interactive MMIO Framebuffer Painter & Gamepad Demo
-// Demonstrates bare-metal ARM64 interactive input handling and dynamic rendering.
+// Demonstrates bare-metal ARM64 interactive input handling and dynamic 60 FPS rendering.
 //
 // Hardware Architecture:
-// - VRAM Framebuffer Base Address: 0x00800000 (320 x 240, 32-bit RGBA)
+// - VRAM Framebuffer Base Address: 0x00800000 (320 x 240, 32-bit RGBA in Little-Endian 0xAABBGGRR)
 // - MMIO Input Peripheral Base   : 0x00850000
-//     * 0x00850000: Key state bitmask (Up=1, Down=2, Left=4, Right=8, Paint=16, Color=32, Clear=64)
+//     * 0x00850000: Key state bitmask (Up=1, Down=2, Left=4, Right=8, Paint=16, Color=32, Clear=64, Exit=128)
 //     * 0x00850004: Last key ASCII code
 //     * 0x00850008: Pointer X (0..319)
 //     * 0x0085000C: Pointer Y (0..239)
@@ -47,13 +47,6 @@ static inline void sys_yield() {
     __asm__ volatile("svc #0" : : "r"(x8) : "memory");
 }
 
-static inline void put_pixel(int x, int y, unsigned int rgba) {
-    if (x >= 0 && x < FB_WIDTH && y >= 0 && y < FB_HEIGHT) {
-        volatile unsigned int* fb = (volatile unsigned int*)VRAM_BASE;
-        fb[y * FB_WIDTH + x] = rgba;
-    }
-}
-
 void clear_canvas(unsigned int bg_color) {
     volatile unsigned int* fb = (volatile unsigned int*)VRAM_BASE;
     for (int i = 0; i < TOTAL_PIXELS; ++i) {
@@ -62,56 +55,73 @@ void clear_canvas(unsigned int bg_color) {
 }
 
 void _start() {
-    clear_canvas(0xFF0F172A); // Dark slate canvas
+    volatile unsigned int* fb = (volatile unsigned int*)VRAM_BASE;
+    const unsigned int bg_color = 0xFF2A170F; // Dark Slate (#0F172A in LE 0xAABBGGRR)
 
     int cur_x = 160;
     int cur_y = 120;
+    unsigned int prev_keys = 0;
     unsigned int palette[4] = {
-        0xFF38BDF8, // Cyan
-        0xFFF59E0B, // Amber
-        0xFF10B981, // Emerald Green
-        0xFFF43F5E  // Rose Red
+        0xFFF8BD38, // Cyan    (#38BDF8)
+        0xFF0B9EF5, // Amber   (#F59E0B)
+        0xFF81B910, // Emerald (#10B981)
+        0xFF5E3FF4  // Rose    (#F43F5E)
     };
     int color_idx = 0;
 
+    clear_canvas(bg_color);
+    volatile unsigned int* cursor_ptr = &fb[cur_y * FB_WIDTH + cur_x];
+    unsigned int saved_pixel = bg_color;
+
     while (1) {
+        // Restore pixel underneath previous frame's white cursor dot
+        *cursor_ptr = saved_pixel;
+
         unsigned int keys = REG_KEY_STATE;
         unsigned int mouse_btn = REG_POINTER_BTN;
 
         if (keys & KEY_EXIT) break;
 
-        // Move cursor with directional controls
-        if (keys & KEY_UP)    if (cur_y > 4) cur_y -= 2;
-        if (keys & KEY_DOWN)  if (cur_y < FB_HEIGHT - 5) cur_y += 2;
-        if (keys & KEY_LEFT)  if (cur_x > 4) cur_x -= 2;
-        if (keys & KEY_RIGHT) if (cur_x < FB_WIDTH - 5) cur_x += 2;
+        if ((keys & KEY_CLEAR) && !(prev_keys & KEY_CLEAR)) {
+            prev_keys = keys;
+            clear_canvas(bg_color);
+            cursor_ptr = &fb[cur_y * FB_WIDTH + cur_x];
+            saved_pixel = bg_color;
+        }
 
-        // Mouse pointer override if mouse active
+        // Move cursor with directional controls
+        if (keys & KEY_UP)    { cur_y -= 2; if (cur_y < 4) cur_y = 4; }
+        if (keys & KEY_DOWN)  { cur_y += 2; if (cur_y > 235) cur_y = 235; }
+        if (keys & KEY_LEFT)  { cur_x -= 2; if (cur_x < 4) cur_x = 4; }
+        if (keys & KEY_RIGHT) { cur_x += 2; if (cur_x > 315) cur_x = 315; }
+
+        // Mouse pointer override if mouse clicked
         if (mouse_btn & 1) {
             cur_x = REG_POINTER_X;
             cur_y = REG_POINTER_Y;
         }
 
-        if (keys & KEY_CLEAR) {
-            clear_canvas(0xFF0F172A);
-        }
-
-        if (keys & KEY_COLOR) {
+        // Rising-edge detection on Color cycle key
+        if ((keys & KEY_COLOR) && !(prev_keys & KEY_COLOR)) {
             color_idx = (color_idx + 1) & 3;
         }
+        prev_keys = keys;
 
-        // Paint brush stroke (3x3 pixels)
+        cursor_ptr = &fb[cur_y * FB_WIDTH + cur_x];
+
+        // Paint 5-pixel cross brush stroke
         if ((keys & KEY_PAINT) || (mouse_btn & 1)) {
             unsigned int color = palette[color_idx];
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dx = -1; dx <= 1; ++dx) {
-                    put_pixel(cur_x + dx, cur_y + dy, color);
-                }
-            }
+            cursor_ptr[0] = color;
+            cursor_ptr[1] = color;
+            cursor_ptr[-1] = color;
+            cursor_ptr[FB_WIDTH] = color;
+            cursor_ptr[-FB_WIDTH] = color;
         }
 
-        // Draw crosshair cursor (temporarily or persistent tip)
-        put_pixel(cur_x, cur_y, 0xFFFFFFFF);
+        // Save underlying pixel and draw white cursor dot
+        saved_pixel = *cursor_ptr;
+        *cursor_ptr = 0xFFFFFFFF;
 
         // Yield execution to host VSync (60 FPS)
         sys_yield();

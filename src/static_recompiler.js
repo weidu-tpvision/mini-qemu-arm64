@@ -127,13 +127,17 @@ export class StaticRecompiler {
           lines.push(`${indent}${spOrReg(decoded.rd)} = ${spOrReg(decoded.rn)} - ${decoded.immValue}n; // ${decoded.disassembly}`);
           break;
 
-        case InstructionType.ADD_REG:
-          lines.push(`${indent}x[${decoded.rd}] = ${regExpr(decoded.rn)} + ${regExpr(decoded.rm)}; // ${decoded.disassembly}`);
+        case InstructionType.ADD_REG: {
+          const rmExpr = decoded.imm6 > 0 ? `(${regExpr(decoded.rm)} << ${decoded.imm6}n)` : regExpr(decoded.rm);
+          lines.push(`${indent}x[${decoded.rd}] = ${regExpr(decoded.rn)} + ${rmExpr}; // ${decoded.disassembly}`);
           break;
+        }
 
-        case InstructionType.SUB_REG:
-          lines.push(`${indent}x[${decoded.rd}] = ${regExpr(decoded.rn)} - ${regExpr(decoded.rm)}; // ${decoded.disassembly}`);
+        case InstructionType.SUB_REG: {
+          const rmExpr = decoded.imm6 > 0 ? `(${regExpr(decoded.rm)} << ${decoded.imm6}n)` : regExpr(decoded.rm);
+          lines.push(`${indent}x[${decoded.rd}] = ${regExpr(decoded.rn)} - ${rmExpr}; // ${decoded.disassembly}`);
           break;
+        }
 
         case InstructionType.MUL:
           lines.push(`${indent}x[${decoded.rd}] = BigInt.asUintN(64, ${regExpr(decoded.rn)} * ${regExpr(decoded.rm)}); // ${decoded.disassembly}`);
@@ -298,7 +302,7 @@ export class StaticRecompiler {
 
         case InstructionType.SVC:
           lines.push(`${indent}// Supervisor Call (${decoded.disassembly}): check X8 syscall (64=write, 93/94=exit, 124=yield)`);
-          lines.push(`${indent}if (x[8] === 124n) { x[0] = 0n; }`);
+          lines.push(`${indent}if (x[8] === 124n) { x[0] = 0n; return Number(x[0]); }`);
           lines.push(`${indent}if (x[8] === 93n || x[8] === 94n) return Number(x[0]);`);
           break;
 

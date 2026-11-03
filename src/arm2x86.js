@@ -141,7 +141,7 @@ export class Arm2X86Translator {
 
         case InstructionType.MOVK: {
           const rd = this.reg(decoded.rd);
-          const shift = (decoded.hw ?? 0) * 16;
+          const shift = Number(decoded.shift ?? ((decoded.hw ?? 0) * 16));
           const mask = ~(0xffffn << BigInt(shift)) & 0xffffffffffffffffn;
           const val = (BigInt(decoded.imm16) & 0xffffn) << BigInt(shift);
           x86Asm = `and ${rd}, 0x${mask.toString(16)} ; or ${rd}, 0x${val.toString(16)}`;
@@ -213,12 +213,13 @@ export class Arm2X86Translator {
           const dst = X86_REG_INDEX[rd] ?? 0;
           const base = X86_REG_INDEX[rn] ?? 0;
           const idx = X86_REG_INDEX[rm] ?? 0;
+          const rmShifted = decoded.imm6 > 0 ? `(${rm} << ${decoded.imm6})` : rm;
           if (rd === rn) {
-            x86Asm = `add ${rd}, ${rm}`;
+            x86Asm = `add ${rd}, ${rmShifted}`;
             x86Bytes = [0x48, 0x01, 0xc0 + (idx << 3) + dst];
           } else {
             // In x86-64, 3-operand addition Rd = Rn + Rm maps to LEA Rd, [Rn + Rm] (ModR/M + SIB)
-            x86Asm = `lea ${rd}, [${rn} + ${rm}]`;
+            x86Asm = `lea ${rd}, [${rn} + ${rmShifted}]`;
             x86Bytes = [0x48, 0x8d, (dst << 3) | 0x04, (idx << 3) | base];
           }
           break;
@@ -230,12 +231,13 @@ export class Arm2X86Translator {
           const rm = this.reg(decoded.rm);
           const dst = X86_REG_INDEX[rd] ?? 0;
           const src = X86_REG_INDEX[rm] ?? 0;
+          const rmShifted = decoded.imm6 > 0 ? `(${rm} << ${decoded.imm6})` : rm;
           if (rd === rn) {
-            x86Asm = `sub ${rd}, ${rm}`;
+            x86Asm = `sub ${rd}, ${rmShifted}`;
             x86Bytes = [0x48, 0x29, 0xc0 + (src << 3) + dst];
           } else {
             const base = X86_REG_INDEX[rn] ?? 0;
-            x86Asm = `mov ${rd}, ${rn} ; sub ${rd}, ${rm}`;
+            x86Asm = `mov ${rd}, ${rn} ; sub ${rd}, ${rmShifted}`;
             x86Bytes = [0x48, 0x89, 0xc0 + (base << 3) + dst, 0x48, 0x29, 0xc0 + (src << 3) + dst];
           }
           break;

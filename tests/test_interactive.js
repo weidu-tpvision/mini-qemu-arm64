@@ -83,53 +83,77 @@ console.log("[PASS] Input MMIO register layout verified (0x00850000 - 0x00850014
   const emu = new MiniQEMU();
   emu.loadElf("bin/interactive_paint.elf");
 
-  // Run through clear-screen initialization until first yield
-  let firstYield = false;
-  for (let i = 0; i < 300000; i++) {
-    const res = emu.step(false);
-    if (res.yielded) {
-      firstYield = true;
-      break;
-    }
-  }
-  assert.ok(firstYield, "interactive_paint.elf must reach first frame yield");
-
-  // Simulate holding RIGHT + ACTION_A (Move right and paint)
-  emu.setKeyState(KEY_MASK_RIGHT | KEY_MASK_ACTION_A);
-
-  // Run 3 frames of interactive movement and painting
-  for (let frame = 0; frame < 3; frame++) {
-    for (let i = 0; i < 1000; i++) {
+  const runOneFrame = (maxSteps = 300000) => {
+    for (let i = 0; i < maxSteps; i++) {
       const res = emu.step(false);
-      if (res.yielded) break;
+      if (res.yielded || res.halted) return res;
     }
+    throw new Error("Frame did not yield within maxSteps");
+  };
+
+  // Frame 1: Run through clear-screen initialization until first yield
+  let res = runOneFrame(300000);
+  assert.strictEqual(res.yielded, true, "interactive_paint.elf must reach first frame yield");
+  // Initial cursor at (160, 120) must be white
+  assert.deepStrictEqual(emu.readVramPixel(160, 120), { r: 255, g: 255, b: 255, a: 255 });
+
+  // Frame 2: Move RIGHT without holding ACTION_A (non-destructive cursor move: 160 -> 162)
+  emu.setKeyState(KEY_MASK_RIGHT);
+  runOneFrame(1000);
+  // Old cursor position (160, 120) must be restored to Dark Slate (#0F172A -> r:15, g:23, b:42)
+  assert.deepStrictEqual(
+    emu.readVramPixel(160, 120),
+    { r: 15, g: 23, b: 42, a: 255 },
+    "Moving cursor without ACTION_A must restore background pixel (no white trail)"
+  );
+  assert.deepStrictEqual(
+    emu.readVramPixel(162, 120),
+    { r: 255, g: 255, b: 255, a: 255 },
+    "New cursor position (162, 120) must show white cursor"
+  );
+
+  // Frames 3..5: Hold RIGHT + ACTION_A (Move right 162 -> 164 -> 166 -> 168 and paint Cyan #38BDF8)
+  emu.setKeyState(KEY_MASK_RIGHT | KEY_MASK_ACTION_A);
+  for (let frame = 0; frame < 3; frame++) {
+    runOneFrame(1000);
   }
 
-  // Cursor moved right from 160 -> 162 -> 164 -> 166 at y=120
-  // Brush right pixel at (163, 120) should have cyan color (0xff38bdf8: byte0=r=248, byte1=g=189, byte2=b=56, byte3=a=255)
-  const brushPx = emu.readVramPixel(163, 120);
-  assert.strictEqual(brushPx.a, 255, "Alpha channel must be 255");
-  assert.strictEqual(brushPx.r, 248, "Red byte must be 248 (0xf8)");
-  assert.strictEqual(brushPx.g, 189, "Green byte must be 189 (0xbd)");
-  assert.strictEqual(brushPx.b, 56, "Blue byte must be 56 (0x38)");
+  // Brush pixel at (164, 120) must be Cyan (#38BDF8 -> r:56, g:189, b:248, a:255)
+  const cyanPx = emu.readVramPixel(164, 120);
+  assert.deepStrictEqual(
+    cyanPx,
+    { r: 56, g: 189, b: 248, a: 255 },
+    "Painted brush pixel must be Little-Endian RGBA Cyan (#38BDF8)"
+  );
 
-  // Cursor pixel at (166, 120) should be white (255, 255, 255, 255)
-  const cursorPx = emu.readVramPixel(166, 120);
-  assert.deepStrictEqual(cursorPx, { r: 255, g: 255, b: 255, a: 255 }, "Cursor must be white crosshair");
+  // Test rising-edge [B] Color (KEY_MASK_ACTION_B): hold across 3 frames, must cycle only once (Cyan -> Amber #F59E0B)
+  emu.setKeyState(KEY_MASK_ACTION_B | KEY_MASK_ACTION_A);
+  for (let frame = 0; frame < 3; frame++) {
+    runOneFrame(1000);
+  }
+  // Neighbouring brush pixel (169, 120) should be Amber (#F59E0B -> r:245, g:158, b:11, a:255)
+  const amberPx = emu.readVramPixel(169, 120);
+  assert.deepStrictEqual(
+    amberPx,
+    { r: 245, g: 158, b: 11, a: 255 },
+    "Holding KEY_MASK_ACTION_B across 3 frames must cycle palette once to Amber (#F59E0B)"
+  );
+
+  // Test [R] Clear (KEY_MASK_RESET): clears painted canvas back to Dark Slate (#0F172A)
+  emu.setKeyState(KEY_MASK_RESET);
+  runOneFrame(300000);
+  assert.deepStrictEqual(
+    emu.readVramPixel(164, 120),
+    { r: 15, g: 23, b: 42, a: 255 },
+    "KEY_MASK_RESET must clear painted strokes back to #0F172A"
+  );
 
   // Simulate Exit Key (bit 7 = 0x80)
   emu.setKeyState(0x80);
-  let halted = false;
-  for (let i = 0; i < 100; i++) {
-    const res = emu.step(false);
-    if (res.halted) {
-      halted = true;
-      assert.strictEqual(res.exitCode, 0, "Exit code must be 0");
-      break;
-    }
-  }
-  assert.ok(halted, "interactive_paint.elf must halt cleanly upon exit key");
-  console.log("[PASS] bin/interactive_paint.elf interactive loop, paint strokes & clean exit verified");
+  res = runOneFrame(100);
+  assert.strictEqual(res.halted, true, "interactive_paint.elf must halt cleanly upon exit key");
+  assert.strictEqual(res.exitCode, 0, "Exit code must be 0");
+  console.log("[PASS] bin/interactive_paint.elf non-destructive cursor, RGBA palette, rising-edge color & reset verified");
 }
 
 // 5. Test Translator Coverage (StaticRecompiler & Arm2X86Translator) on interactive_paint.elf
@@ -137,13 +161,20 @@ console.log("[PASS] Input MMIO register layout verified (0x00850000 - 0x00850014
   const aot = new StaticRecompiler("bin/interactive_paint.elf");
   const jsCode = aot.recompile(false);
   assert.ok(jsCode.includes("x[8] = 93n;"), "AOT must reach exit syscall");
+  assert.ok(jsCode.includes("<< 6n"), "AOT must preserve shifted register operand (lsl #6)");
   assert.ok(!jsCode.includes("UNHANDLED"), "AOT must have 0 unhandled instructions");
+
+  // Verify AOT function executes 1 VSync frame and returns cleanly without infinite loop
+  const bodySource = jsCode.replace(/export\s+function\s+runNative\s*\(\)\s*\{/, "").replace(/\}\s*$/, "");
+  const nativeFn = new Function(bodySource);
+  assert.strictEqual(nativeFn(), 0, "Static AOT runNative() must return 0 at VSync frame yield");
 
   const x86 = new Arm2X86Translator("bin/interactive_paint.elf");
   const fullAsm = x86.translate(false);
   assert.ok(!fullAsm.includes("[untranslated"), "x86-64 translator must have 0 untranslated instructions");
+  assert.ok(fullAsm.includes("<< 6"), "x86-64 translator must preserve shifted register operand");
   assert.ok(fullAsm.includes("syscall"), "x86-64 translator must include syscall");
-  console.log("[PASS] StaticRecompiler and Arm2X86Translator 100% coverage on interactive_paint.elf verified");
+  console.log("[PASS] StaticRecompiler and Arm2X86Translator 100% coverage & VSync return on interactive_paint.elf verified");
 }
 
 console.log("\nAll Interactive MMIO Input & VSync Frame-Yield Tests Passed Successfully!");

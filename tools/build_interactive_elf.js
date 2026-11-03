@@ -1,9 +1,9 @@
 // tools/build_interactive_elf.js - Builds Interactive MMIO Framebuffer ARM64 ELF Binary
 // Generates: bin/interactive_paint.elf
 // Supports:
-// - Keyboard Input (Arrow Keys / WASD, Space for Paint, Shift for Color, R for Clear, Q for Exit)
+// - Keyboard Input (Arrow Keys / WASD, Space for Paint, Shift/C for Color, R for Clear, Q for Exit)
 // - Mouse / Pointer Input (Click & Drag to paint at pointer coords)
-// - 60 FPS VSync via sys_sched_yield (syscall 124)
+// - Non-destructive cursor save/restore across 60 FPS VSync yields (sys_sched_yield, syscall 124)
 
 import fs from "fs";
 import path from "path";
@@ -64,7 +64,6 @@ function buildElfWithPayload(instructions, dataBuffer = Buffer.alloc(0), entryAd
 
 export function generateInteractivePaintElf() {
   const instructions = [];
-  const labels = {};
 
   // Helper encoders
   const encMovz = (rd, imm16, lsl = 0) => 0xd2800000 | ((lsl / 16) << 21) | ((imm16 & 0xffff) << 5) | rd;
@@ -76,18 +75,11 @@ export function generateInteractivePaintElf() {
   const encAddReg = (rd, rn, rm) => 0x8b000000 | (rm << 16) | (rn << 5) | rd;
   const encAddRegShift = (rd, rn, rm, lsl) => 0x8b000000 | (rm << 16) | ((lsl & 0x3f) << 10) | (rn << 5) | rd;
   const encLslImm = (rd, rn, shift) => {
-    // UBFM 64-bit: lsl xd, xn, #shift -> imms = 63 - shift, immr = 64 - shift
     const imms = (63 - shift) & 0x3f;
     const immr = (64 - shift) & 0x3f;
     return 0xd3400000 | (immr << 16) | (imms << 10) | (rn << 5) | rd;
   };
-  const encAndImm = (rd, rn, mask) => {
-    // For small masks like #3 (0b11), UBFM ubfx xd, xn, #0, #2
-    if (mask === 3) {
-      return 0x53000000 | (0 << 16) | (1 << 10) | (rn << 5) | rd; // ubfx wd, wn, #0, #2
-    }
-    return 0x8a000000 | (rn << 16) | (rn << 5) | rd;
-  };
+  const encAndImm3 = (rd, rn) => 0x53000000 | (0 << 16) | (1 << 10) | (rn << 5) | rd; // ubfx wd, wn, #0, #2
 
   const encLdrwImm = (rt, rn, imm12) => 0xb9400000 | (((imm12 / 4) & 0xfff) << 10) | (rn << 5) | rt;
   const encStrwImm = (rt, rn, imm12) => 0xb9000000 | (((imm12 / 4) & 0xfff) << 10) | (rn << 5) | rt;
@@ -123,147 +115,157 @@ export function generateInteractivePaintElf() {
     return 0x10000000 | (immlo << 29) | (immhi << 5) | rd;
   };
 
-  // Conditions
-  const COND_EQ = 0, COND_NE = 1, COND_GT = 12, COND_LT = 11;
+  const COND_NE = 1, COND_GT = 12, COND_LT = 11;
 
-  // Assembly sequence:
-  // Step 1: Clear VRAM (0x00800000, 76,800 pixels with dark slate 0xFF0F172A)
-  // Store permanent base pointers in x19 (VRAM) and x20 (INPUT) so syscalls don't clobber them
+  // Step 1: Initialize Permanent Pointers & State
+  // x19 = 0x00800000 (VRAM_BASE), x20 = 0x00850000 (INPUT_BASE), x21 = prev_keys = 0
   instructions.push(encMovz(19, 0x0080, 16));              // x19 = 0x00800000 (VRAM_BASE)
   instructions.push(encMovz(20, 0x0085, 16));              // x20 = 0x00850000 (INPUT_BASE)
-
-  instructions.push(encAddImm(0, 19, 0));                  // x0 = x19 (temporary pointer for clear loop)
-  instructions.push(encMovz(1, 0x2c00));                   // x1 = 76800 = 0x12c00
-  instructions.push(encMovk(1, 1, 16));
-  // Dark slate color word: 0xFF0F172A
-  instructions.push(encMovz(2, 0x172a));
-  instructions.push(encMovk(2, 0xff0f, 16));
-
-  // <clear_loop>:
-  const CLEAR_LOOP_IDX = instructions.length;
-  instructions.push(encStrwPostIndex(2, 0, 4));            // str w2, [x0], #4
-  instructions.push(encSubsImm(1, 1, 1));                  // subs x1, x1, #1
-  // branch back to CLEAR_LOOP_IDX if NE
-  const clearDisp = (CLEAR_LOOP_IDX - instructions.length) * 4;
-  instructions.push(encBCond(COND_NE, clearDisp));         // b.ne <clear_loop>
-
-  // Step 2: Setup Interactive State
+  instructions.push(encMovz(21, 0));                       // x21 = prev_keys = 0
   instructions.push(encMovz(4, 160));                      // x4 = cur_x = 160
   instructions.push(encMovz(5, 120));                      // x5 = cur_y = 120
   instructions.push(encMovz(6, 0));                        // x6 = color_idx = 0
-  // ADR to palette table (we will compute exact displacement at end)
   const ADR_PALETTE_IDX = instructions.length;
-  instructions.push(0); // placeholder for encAdr(10, offset)
+  instructions.push(0);                                    // placeholder: adr x10, #palette_table
+
+  // Dark slate color word (#0F172A -> R=0x0f, G=0x17, B=0x2a, A=0xff -> 0xFF2A170F in LE)
+  instructions.push(encMovz(2, 0x170f));
+  instructions.push(encMovk(2, 0xff2a, 16));               // w2 = 0xFF2A170F
+
+  // <clear_canvas>: Fill all 76,800 pixels with w2 (0xFF2A170F)
+  const CLEAR_CANVAS_IDX = instructions.length;
+  instructions.push(encAddImm(0, 19, 0));                  // x0 = VRAM_BASE
+  instructions.push(encMovz(1, 0x2c00));                   // x1 = 76800 = 0x12c00
+  instructions.push(encMovk(1, 1, 16));
+
+  const CLEAR_LOOP_IDX = instructions.length;
+  instructions.push(encStrwPostIndex(2, 0, 4));            // str w2, [x0], #4
+  instructions.push(encSubsImm(1, 1, 1));                  // subs x1, x1, #1
+  instructions.push(encBCond(COND_NE, (CLEAR_LOOP_IDX - instructions.length) * 4));
+
+  // Initialize cursor backup address (x18) & saved pixel (w17) at (cur_x, cur_y)
+  instructions.push(encLslImm(18, 5, 8));                  // x18 = y << 8
+  instructions.push(encAddRegShift(18, 18, 5, 6));         // x18 += y << 6 (y * 320)
+  instructions.push(encAddReg(18, 18, 4));                 // x18 += x
+  instructions.push(encLslImm(18, 18, 2));                 // x18 *= 4
+  instructions.push(encAddReg(18, 18, 19));                // x18 += VRAM_BASE
+  instructions.push(encAddImm(17, 2, 0));                  // w17 = background color (0xFF2A170F)
 
   // <main_loop>:
   const MAIN_LOOP_IDX = instructions.length;
+
+  // 0. Erase previous frame's white cursor dot before moving or painting
+  instructions.push(encStrwImm(17, 18, 0));                // str w17, [x18]
 
   // 1. Read Inputs from x20 (INPUT_BASE)
   instructions.push(encLdrwImm(11, 20, 0));                // w11 = ldr [x20, #0] (KEY_STATE)
   instructions.push(encLdrwImm(12, 20, 16));               // w12 = ldr [x20, #16] (POINTER_BTN)
 
-  // 2. Check Exit Key (bit 7)
+  // 2. Check Exit Key (bit 7 = 0x80)
   const EXIT_BRANCH_IDX = instructions.length;
-  instructions.push(0); // placeholder tbnz w11, #7, <exit>
+  instructions.push(0);                                    // tbnz w11, #7, <exit>
 
-  // 3. Check Directional Keys
+  // 3. Check Clear Key (bit 6 = 0x40) with rising-edge detection: if newly pressed, save x21 and jump to <clear_canvas>
+  instructions.push(encTbz(11, 6, 16));                    // tbz w11, #6, +16 (<skip_clear>)
+  instructions.push(encTbnz(21, 6, 12));                   // tbnz w21, #6, +12 (<skip_clear>)
+  instructions.push(encAddImm(21, 11, 0));                 // x21 = x11 (mark handled before jumping)
+  const clearBranchDisp = (CLEAR_CANVAS_IDX - instructions.length) * 4;
+  instructions.push(encB(clearBranchDisp));                // b <clear_canvas>
+
+  // 4. Check Directional Keys
   // UP (bit 0): if held, y -= 2
   const UP_BRANCH_IDX = instructions.length;
-  instructions.push(0); // tbz w11, #0, <skip_up>
-  instructions.push(encSubImm(5, 5, 2));                   // y -= 2
+  instructions.push(0);                                    // tbz w11, #0, <skip_up>
+  instructions.push(encSubImm(5, 5, 2));
   instructions.push(encCmpImm(5, 4));
-  instructions.push(encBCond(COND_GT, 8));                 // if y > 4 skip clamp
-  instructions.push(encMovz(5, 4));                        // y = 4
+  instructions.push(encBCond(COND_GT, 8));
+  instructions.push(encMovz(5, 4));
   const SKIP_UP_IDX = instructions.length;
 
   // DOWN (bit 1): if held, y += 2
   const DOWN_BRANCH_IDX = instructions.length;
-  instructions.push(0); // tbz w11, #1, <skip_down>
-  instructions.push(encAddImm(5, 5, 2));                   // y += 2
+  instructions.push(0);                                    // tbz w11, #1, <skip_down>
+  instructions.push(encAddImm(5, 5, 2));
   instructions.push(encCmpImm(5, 235));
-  instructions.push(encBCond(COND_LT, 8));                 // if y < 235 skip clamp
-  instructions.push(encMovz(5, 235));                      // y = 235
+  instructions.push(encBCond(COND_LT, 8));
+  instructions.push(encMovz(5, 235));
   const SKIP_DOWN_IDX = instructions.length;
 
   // LEFT (bit 2): if held, x -= 2
   const LEFT_BRANCH_IDX = instructions.length;
-  instructions.push(0); // tbz w11, #2, <skip_left>
-  instructions.push(encSubImm(4, 4, 2));                   // x -= 2
+  instructions.push(0);                                    // tbz w11, #2, <skip_left>
+  instructions.push(encSubImm(4, 4, 2));
   instructions.push(encCmpImm(4, 4));
-  instructions.push(encBCond(COND_GT, 8));                 // if x > 4 skip clamp
-  instructions.push(encMovz(4, 4));                        // x = 4
+  instructions.push(encBCond(COND_GT, 8));
+  instructions.push(encMovz(4, 4));
   const SKIP_LEFT_IDX = instructions.length;
 
   // RIGHT (bit 3): if held, x += 2
   const RIGHT_BRANCH_IDX = instructions.length;
-  instructions.push(0); // tbz w11, #3, <skip_right>
-  instructions.push(encAddImm(4, 4, 2));                   // x += 2
+  instructions.push(0);                                    // tbz w11, #3, <skip_right>
+  instructions.push(encAddImm(4, 4, 2));
   instructions.push(encCmpImm(4, 315));
-  instructions.push(encBCond(COND_LT, 8));                 // if x < 315 skip clamp
-  instructions.push(encMovz(4, 315));                      // x = 315
+  instructions.push(encBCond(COND_LT, 8));
+  instructions.push(encMovz(4, 315));
   const SKIP_RIGHT_IDX = instructions.length;
 
-  // 4. Mouse Pointer override if mouse clicked
+  // 5. Mouse Pointer override if mouse clicked
   const MOUSE_BRANCH_IDX = instructions.length;
-  instructions.push(0); // tbz w12, #0, <skip_mouse>
+  instructions.push(0);                                    // tbz w12, #0, <skip_mouse>
   instructions.push(encLdrwImm(4, 20, 8));                 // cur_x = pointer_x
   instructions.push(encLdrwImm(5, 20, 12));                // cur_y = pointer_y
   const SKIP_MOUSE_IDX = instructions.length;
 
-  // 5. Check Paint Key (bit 4) or Mouse Button 0
+  // 6. Check Color Cycle Key (bit 5) with rising-edge detection (w11 bit 5 == 1 && w21 bit 5 == 0)
+  const COLOR_BRANCH_IDX = instructions.length;
+  instructions.push(0);                                    // tbz w11, #5, <skip_color>
+  const COLOR_EDGE_BRANCH_IDX = instructions.length;
+  instructions.push(0);                                    // tbnz w21, #5, <skip_color>
+  instructions.push(encAddImm(6, 6, 1));                   // color_idx++
+  instructions.push(encAndImm3(6, 6));                     // color_idx &= 3
+  const SKIP_COLOR_IDX = instructions.length;
+
+  // Save current keys into x21 for next frame's edge detection
+  instructions.push(encAddImm(21, 11, 0));                 // x21 = x11
+
+  // 7. Compute Current Cursor VRAM Address into x18 = VRAM_BASE + (cur_y * 320 + cur_x) * 4
+  instructions.push(encLslImm(18, 5, 8));                  // x18 = y << 8 (256)
+  instructions.push(encAddRegShift(18, 18, 5, 6));         // x18 += y << 6 (64) -> y * 320
+  instructions.push(encAddReg(18, 18, 4));                 // x18 += x
+  instructions.push(encLslImm(18, 18, 2));                 // x18 *= 4
+  instructions.push(encAddReg(18, 18, 19));                // x18 += VRAM_BASE (x19)
+
+  // 8. Check Paint Key (bit 4) or Mouse Button 0
   const PAINT_KEY_BRANCH_IDX = instructions.length;
-  instructions.push(0); // tbz w11, #4, <check_mouse_paint>
-  // Jump to paint execution
-  instructions.push(encB(8)); // jump over check_mouse_paint
+  instructions.push(0);                                    // tbz w11, #4, <check_mouse_paint>
+  instructions.push(encB(8));                              // jump over check_mouse_paint
 
   const CHK_MOUSE_PAINT_IDX = instructions.length;
   const PAINT_MOUSE_BRANCH_IDX = instructions.length;
-  instructions.push(0); // tbz w12, #0, <skip_paint>
+  instructions.push(0);                                    // tbz w12, #0, <skip_paint>
 
-  // <do_paint>:
-  // Load brush color: w14 = palette[color_idx]
-  instructions.push(encLdrwRegOffset(14, 10, 6));
-
-  // Compute offset: (y * 320 + x) * 4
-  // y * 320 = (y << 8) + (y << 6)
-  instructions.push(encLslImm(15, 5, 8));                  // x15 = y << 8 (256)
-  instructions.push(encAddRegShift(15, 15, 5, 6));         // x15 += y << 6 (64) -> y * 320
-  instructions.push(encAddReg(15, 15, 4));                 // x15 += x
-  instructions.push(encLslImm(15, 15, 2));                 // x15 *= 4
-  instructions.push(encAddReg(15, 15, 19));                // x15 += VRAM_BASE (x19)
-
-  // Paint 5-pixel cross brush (center + 4 adjacent)
-  instructions.push(encStrwImm(14, 15, 0));                // center
-  instructions.push(encStrwImm(14, 15, 4));                // right
-  instructions.push(encStrwImm(14, 15, 320 * 4));          // down (1280)
-  instructions.push(encSubImm(16, 15, 4));
+  // <do_paint>: Paint 5-pixel cross brush at x18
+  instructions.push(encLdrwRegOffset(14, 10, 6));          // w14 = palette[color_idx]
+  instructions.push(encStrwImm(14, 18, 0));                // center
+  instructions.push(encStrwImm(14, 18, 4));                // right
+  instructions.push(encStrwImm(14, 18, 320 * 4));          // down (1280)
+  instructions.push(encSubImm(16, 18, 4));
   instructions.push(encStrwImm(14, 16, 0));                // left
-  instructions.push(encSubImm(16, 15, 320 * 4));
+  instructions.push(encSubImm(16, 18, 320 * 4));
   instructions.push(encStrwImm(14, 16, 0));                // up
   const SKIP_PAINT_IDX = instructions.length;
 
-  // 6. Draw White Crosshair Cursor at (cur_x, cur_y)
+  // 9. Save Underlying Pixel at [x18] into w17, then Draw White Cursor Dot (0xFFFFFFFF)
+  instructions.push(encLdrwImm(17, 18, 0));                // w17 = underlying pixel at [x18]
   instructions.push(encMovz(16, 0xffff));
   instructions.push(encMovk(16, 0xffff, 16));              // w16 = 0xFFFFFFFF (White)
-  instructions.push(encLslImm(15, 5, 8));                  // y * 256
-  instructions.push(encAddRegShift(15, 15, 5, 6));         // + y * 64 = y * 320
-  instructions.push(encAddReg(15, 15, 4));                 // + x
-  instructions.push(encLslImm(15, 15, 2));                 // * 4
-  instructions.push(encAddReg(15, 15, 19));                // + VRAM_BASE (x19)
-  instructions.push(encStrwImm(16, 15, 0));                // Put white cursor dot
+  instructions.push(encStrwImm(16, 18, 0));                // Put white cursor dot at [x18]
 
-  // 7. Check Color Cycle Key (bit 5)
-  const COLOR_BRANCH_IDX = instructions.length;
-  instructions.push(0); // tbz w11, #5, <skip_color>
-  instructions.push(encAddImm(6, 6, 1));                   // color_idx++
-  instructions.push(encAndImm(6, 6, 3));                   // color_idx &= 3
-  const SKIP_COLOR_IDX = instructions.length;
-
-  // 8. VSync Yield (sys_sched_yield - syscall 124)
+  // 10. VSync Yield (sys_sched_yield - syscall 124)
   instructions.push(encMovz(8, 124));                      // x8 = 124
   instructions.push(encSvc(0));                            // svc #0 (yield)
 
-  // 9. Loop back to main_loop
+  // 11. Loop back to <main_loop>
   const loopDisp = (MAIN_LOOP_IDX - instructions.length) * 4;
   instructions.push(encB(loopDisp));
 
@@ -279,39 +281,43 @@ export function generateInteractivePaintElf() {
   instructions[LEFT_BRANCH_IDX] = encTbz(11, 2, (SKIP_LEFT_IDX - LEFT_BRANCH_IDX) * 4);
   instructions[RIGHT_BRANCH_IDX] = encTbz(11, 3, (SKIP_RIGHT_IDX - RIGHT_BRANCH_IDX) * 4);
   instructions[MOUSE_BRANCH_IDX] = encTbz(12, 0, (SKIP_MOUSE_IDX - MOUSE_BRANCH_IDX) * 4);
+  instructions[COLOR_BRANCH_IDX] = encTbz(11, 5, (SKIP_COLOR_IDX - COLOR_BRANCH_IDX) * 4);
+  instructions[COLOR_EDGE_BRANCH_IDX] = encTbnz(21, 5, (SKIP_COLOR_IDX - COLOR_EDGE_BRANCH_IDX) * 4);
   instructions[PAINT_KEY_BRANCH_IDX] = encTbz(11, 4, (CHK_MOUSE_PAINT_IDX - PAINT_KEY_BRANCH_IDX) * 4);
   instructions[PAINT_MOUSE_BRANCH_IDX] = encTbz(12, 0, (SKIP_PAINT_IDX - PAINT_MOUSE_BRANCH_IDX) * 4);
-  instructions[COLOR_BRANCH_IDX] = encTbz(11, 5, (SKIP_COLOR_IDX - COLOR_BRANCH_IDX) * 4);
   instructions[EXIT_BRANCH_IDX] = encTbnz(11, 7, (EXIT_TARGET_IDX - EXIT_BRANCH_IDX) * 4);
 
-  // Palette lookup table (4 colors: Cyan, Amber, Emerald, Rose)
+  // Palette lookup table in Little-Endian 0xAABBGGRR format:
+  // 0: Cyan    (#38BDF8 -> R=0x38, G=0xBD, B=0xF8, A=0xFF -> 0xFFF8BD38)
+  // 1: Amber   (#F59E0B -> R=0xF5, G=0x9E, B=0x0B, A=0xFF -> 0xFF0B9EF5)
+  // 2: Emerald (#10B981 -> R=0x10, G=0xB9, B=0x81, A=0xFF -> 0xFF81B910)
+  // 3: Rose    (#F43F5E -> R=0xF4, G=0x3F, B=0x5E, A=0xFF -> 0xFF5E3FF4)
   const PALETTE_DATA_OFFSET = instructions.length * 4;
   instructions[ADR_PALETTE_IDX] = encAdr(10, (PALETTE_DATA_OFFSET - ADR_PALETTE_IDX * 4));
 
   const paletteBuffer = Buffer.alloc(16);
-  paletteBuffer.writeUInt32LE(0xff38bdf8, 0);  // Cyan
-  paletteBuffer.writeUInt32LE(0xfff59e0b, 4);  // Amber
-  paletteBuffer.writeUInt32LE(0xff10b981, 8);  // Emerald
-  paletteBuffer.writeUInt32LE(0xfff43f5e, 12); // Rose
+  paletteBuffer.writeUInt32LE(0xfff8bd38, 0);  // Cyan    (#38BDF8)
+  paletteBuffer.writeUInt32LE(0xff0b9ef5, 4);  // Amber   (#F59E0B)
+  paletteBuffer.writeUInt32LE(0xff81b910, 8);  // Emerald (#10B981)
+  paletteBuffer.writeUInt32LE(0xff5e3ff4, 12); // Rose    (#F43F5E)
 
   const msg = "[Mini-QEMU] Interactive Paint Session Ended cleanly.\n";
   const msgBuffer = Buffer.from(msg, "utf8");
   const dataPayload = Buffer.concat([paletteBuffer, msgBuffer]);
 
-  return buildElfWithPayload(instructions, dataPayload, 0x00400000n);
+  return { buffer: buildElfWithPayload(instructions, dataPayload, 0x00400000n), instructionCount: instructions.length };
 }
 
 // Build and write binary
 fs.mkdirSync(BIN_DIR, { recursive: true });
-const paintElf = generateInteractivePaintElf();
+const { buffer: paintElf, instructionCount } = generateInteractivePaintElf();
 const paintPath = path.join(BIN_DIR, "interactive_paint.elf");
 fs.writeFileSync(paintPath, paintElf);
 console.log(`[PASS] Built "${paintPath}" (${paintElf.length} bytes)`);
 
 // Validate disassembly of all instructions
 let validCount = 0;
-for (let offset = 0x1000; offset < 0x1000 + 70 * 4; offset += 4) {
-  if (offset + 4 > paintElf.length) break;
+for (let offset = 0x1000; offset < 0x1000 + instructionCount * 4; offset += 4) {
   const raw = paintElf.readUInt32LE(offset);
   const d = Decoder.decode(raw);
   if (d.type === "UNKNOWN") {

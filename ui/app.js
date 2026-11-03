@@ -634,6 +634,23 @@ function isGraphicsBinary(filename = "") {
          f.includes("interactive");
 }
 
+function isInteractiveBinary(filename = "") {
+  const f = filename.toLowerCase();
+  return f.includes("interactive") || f.includes("paint") || f.includes("game");
+}
+
+function runUntilFrameOrHalt(emuInstance, maxCycles = 2000000) {
+  let steps = 0;
+  while (!emuInstance.cpu.halted && steps < maxCycles) {
+    const res = emuInstance.step(false);
+    steps++;
+    if (res.halted || res.yielded || res.hitBreakpoint) {
+      break;
+    }
+  }
+  return Number(emuInstance.cpu.getReg(0));
+}
+
 function switchMemoryTab(tabId) {
   document.querySelectorAll(".mem-tab-btn").forEach(b => {
     b.classList.toggle("active", b.dataset.memtab === tabId);
@@ -687,13 +704,15 @@ function instantRenderFrame() {
     emulator.reset();
   }
   const t0 = performance.now();
-  emulator.run(2000000, false);
+  const prevCycles = emulator.cycleCount;
+  runUntilFrameOrHalt(emulator, 2000000);
+  const frameCycles = emulator.cycleCount - prevCycles;
   const elapsed = (performance.now() - t0).toFixed(1);
   updateCPUState();
   updateDisassemblyPointer();
   updateMemoryGrid(currentMemAddr);
   renderVramScreen(true);
-  appendTerminal(`[Screen] Instant frame rendered in ${elapsed} ms (${emulator.cycleCount.toLocaleString()} cycles).\n`);
+  appendTerminal(`[Screen] Frame rendered in ${elapsed} ms (+${frameCycles.toLocaleString()} cycles, total ${emulator.cycleCount.toLocaleString()}).\n`);
 }
 
 function clearVramScreen() {
@@ -810,6 +829,9 @@ function stopRunning() {
 function resetEmulator() {
   stopRunning();
   emulator.reset();
+  activeKeyMask = 0;
+  isCanvasMouseDown = false;
+  updateInputState();
   changedRegisters.clear();
   changedMemoryBytes.clear();
   updateCPUState();
@@ -847,6 +869,9 @@ function loadBinaryBuffer(buffer, filename, desc = "") {
   }
 
   currentMemAddr = Number(entry);
+  activeKeyMask = 0;
+  isCanvasMouseDown = false;
+  updateInputState();
   changedRegisters.clear();
   changedMemoryBytes.clear();
 
@@ -858,6 +883,10 @@ function loadBinaryBuffer(buffer, filename, desc = "") {
 
   setStatus("READY", "READY", "status-ready");
   appendTerminal(`[Mini-QEMU] Loaded "${filename}" (${buffer.byteLength}B) -> Entry 0x${entry.toString(16).padStart(8, "0")}\n`);
+
+  if (instantRenderBtn) {
+    instantRenderBtn.textContent = isInteractiveBinary(filename) ? "⚡ Step Frame" : "⚡ Instant";
+  }
 
   if (isGraphicsBinary(filename)) {
     speedSlider.value = "5";
@@ -916,7 +945,7 @@ runBenchBtn.addEventListener("click", () => {
     benchEmu.cpu.reset();
     benchEmu.cpu.pc = benchEmu.entryPoint;
     benchEmu.cycleCount = 0;
-    interpRes = benchEmu.run(MAX_CYCLES, false);
+    interpRes = runUntilFrameOrHalt(benchEmu, MAX_CYCLES);
   }
   const interpMs = Math.max(0.05, performance.now() - t0);
 
@@ -1103,6 +1132,16 @@ if (vramCanvas) {
     emulator.setPointerState(x, y, 1);
     activeKeyMask |= KEY_MASK_ACTION_A;
     updateInputState();
+    if (!isRunning && !emulator.cpu.halted && emulator.cycleCount === 0 && isInteractiveBinary(currentLoadedName)) {
+      startRunning();
+    }
+  });
+
+  vramCanvas.addEventListener("dblclick", (e) => {
+    const { x, y } = getCanvasPixelCoords(e);
+    const addr = 0x00800000 + (y * FB_WIDTH + x) * 4;
+    switchMemoryTab("hexView");
+    updateMemoryGrid(addr);
   });
 
   vramCanvas.addEventListener("mousemove", (e) => {
@@ -1115,7 +1154,10 @@ if (vramCanvas) {
     const hexColor = `#${px.r.toString(16).padStart(2, "0")}${px.g.toString(16).padStart(2, "0")}${px.b.toString(16).padStart(2, "0")}`.toUpperCase();
     if (pixelSwatch) pixelSwatch.style.background = hexColor;
     if (pixelCoordText) pixelCoordText.textContent = `X: ${x}, Y: ${y}`;
-    if (pixelAddrText) pixelAddrText.textContent = `@ 0x${addr.toString(16).padStart(8, "0")}`;
+    if (pixelAddrText) {
+      pixelAddrText.textContent = `@ 0x${addr.toString(16).padStart(8, "0")}`;
+      pixelAddrText.dataset.addr = addr.toString();
+    }
     if (pixelRgbaText) pixelRgbaText.textContent = `${hexColor} (${px.r},${px.g},${px.b})`;
   });
 
@@ -1132,6 +1174,16 @@ if (vramCanvas) {
   vramCanvas.addEventListener("mouseleave", stopCanvasDrag);
 }
 
+if (pixelAddrText) {
+  pixelAddrText.style.cursor = "pointer";
+  pixelAddrText.title = "Click to inspect pixel address in Memory Hex";
+  pixelAddrText.addEventListener("click", () => {
+    const addr = parseInt(pixelAddrText.dataset.addr || "8388608", 10);
+    switchMemoryTab("hexView");
+    updateMemoryGrid(addr);
+  });
+}
+
 // Wire on-screen D-Pad and Action buttons
 const bindPressButton = (id, mask) => {
   const btn = document.getElementById(id);
@@ -1140,6 +1192,9 @@ const bindPressButton = (id, mask) => {
     e.preventDefault();
     activeKeyMask |= mask;
     updateInputState();
+    if (!isRunning && !emulator.cpu.halted && emulator.cycleCount === 0 && isInteractiveBinary(currentLoadedName)) {
+      startRunning();
+    }
   };
   const end = (e) => {
     e.preventDefault();
@@ -1170,20 +1225,25 @@ lrBox.addEventListener("click", () => updateMemoryGrid(Number(emulator.cpu.getRe
 window.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
 
+  const isInteractive = isInteractiveBinary(currentLoadedName);
+
   // 1. Check Interactive Gamepad Keys
   let keyBit = 0;
-  if (e.code === "ArrowUp" || e.code === "KeyW") keyBit = KEY_MASK_UP;
-  else if (e.code === "ArrowDown" || e.code === "KeyS" && (isRunning || !e.ctrlKey)) keyBit = KEY_MASK_DOWN;
-  else if (e.code === "ArrowLeft" || e.code === "KeyA") keyBit = KEY_MASK_LEFT;
-  else if (e.code === "ArrowRight" || e.code === "KeyD") keyBit = KEY_MASK_RIGHT;
-  else if (e.code === "Space" && isRunning) keyBit = KEY_MASK_ACTION_A;
-  else if (e.code === "KeyZ" || e.code === "Enter") keyBit = KEY_MASK_ACTION_A;
-  else if (e.code === "ShiftLeft" || e.code === "ShiftRight" || e.code === "KeyX" || e.code === "KeyC") keyBit = KEY_MASK_ACTION_B;
+  if (e.code === "ArrowUp" || (isInteractive && e.code === "KeyW")) keyBit = KEY_MASK_UP;
+  else if (e.code === "ArrowDown" || (isInteractive && e.code === "KeyS" && !e.ctrlKey && !e.metaKey)) keyBit = KEY_MASK_DOWN;
+  else if (e.code === "ArrowLeft" || (isInteractive && e.code === "KeyA")) keyBit = KEY_MASK_LEFT;
+  else if (e.code === "ArrowRight" || (isInteractive && e.code === "KeyD")) keyBit = KEY_MASK_RIGHT;
+  else if ((e.code === "Space" && (isInteractive || isRunning)) || e.code === "KeyZ" || (isInteractive && e.code === "Enter")) keyBit = KEY_MASK_ACTION_A;
+  else if (e.code === "ShiftLeft" || e.code === "ShiftRight" || (isInteractive && (e.code === "KeyX" || e.code === "KeyC"))) keyBit = KEY_MASK_ACTION_B;
+  else if (isInteractive && e.code === "KeyR" && !e.ctrlKey && !e.metaKey) keyBit = KEY_MASK_RESET;
 
   if (keyBit !== 0) {
     e.preventDefault();
     activeKeyMask |= keyBit;
     updateInputState(e.keyCode);
+    if (!isRunning && !emulator.cpu.halted && emulator.cycleCount === 0 && isInteractive) {
+      startRunning();
+    }
     return;
   }
 
@@ -1212,6 +1272,7 @@ window.addEventListener("keyup", (e) => {
   else if (e.code === "ArrowRight" || e.code === "KeyD") keyBit = KEY_MASK_RIGHT;
   else if (e.code === "Space" || e.code === "KeyZ" || e.code === "Enter") keyBit = KEY_MASK_ACTION_A;
   else if (e.code === "ShiftLeft" || e.code === "ShiftRight" || e.code === "KeyX" || e.code === "KeyC") keyBit = KEY_MASK_ACTION_B;
+  else if (e.code === "KeyR") keyBit = KEY_MASK_RESET;
 
   if (keyBit !== 0) {
     activeKeyMask &= ~keyBit;
