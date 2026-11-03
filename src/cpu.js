@@ -13,6 +13,10 @@ export class CPU {
     // Program Counter (PC)
     this.pc = 0n;
 
+    // Thread Pointer System Register (TPIDR_EL0) used by musl/glibc for TLS & errno
+    this.tpidr_el0 = 0n;
+    this.sysRegs = new Map();
+
     // Condition Flags (PSTATE / NZCV)
     this.flags = {
       N: false, // Negative
@@ -70,6 +74,8 @@ export class CPU {
     this.x.fill(0n);
     this.sp = 0x00700000n;
     this.pc = 0n;
+    this.tpidr_el0 = 0n;
+    this.sysRegs.clear();
     this.flags.N = false;
     this.flags.Z = false;
     this.flags.C = false;
@@ -88,6 +94,7 @@ export class CPU {
       regs,
       sp: this.sp,
       pc: this.pc,
+      tpidr_el0: this.tpidr_el0,
       flags: { ...this.flags },
       halted: this.halted,
       exitCode: this.exitCode

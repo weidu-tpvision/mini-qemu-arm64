@@ -5,10 +5,12 @@ export const InstructionType = {
   // Data Processing - Immediate
   MOVZ: "MOVZ",
   MOVN: "MOVN",
+  MOVK: "MOVK",         // Move wide with keep
   ADD_IMM: "ADD_IMM",
   SUB_IMM: "SUB_IMM",
   SUBS_IMM: "SUBS_IMM", // CMP imm is an alias of SUBS xzr, xn, #imm
   ADR: "ADR",           // Form PC-relative address
+  ADRP: "ADRP",         // Form PC-relative 4KB page address
 
   // Data Processing - Register
   ADD_REG: "ADD_REG",
@@ -18,24 +20,37 @@ export const InstructionType = {
   ORR_REG: "ORR_REG",   // MOV is an alias of ORR xd, xzr, xm
   EOR_REG: "EOR_REG",   // Exclusive OR (XOR)
   MVN_REG: "MVN_REG",   // Bitwise NOT (alias of ORN xd, xzr, xm)
+  CSEL: "CSEL",         // Conditional Select
+  CSINC: "CSINC",       // Conditional Select Increment (CSET)
+  CSINV: "CSINV",       // Conditional Select Invert
+  CSNEG: "CSNEG",       // Conditional Select Negate
 
   // Math (Multiply & Divide)
   MUL: "MUL",           // 64-bit multiply (MADD xd, xn, xm, xzr)
+  MADD: "MADD",         // Multiply-Add (xd = xa + xn * xm)
+  MSUB: "MSUB",         // Multiply-Subtract (xd = xa - xn * xm)
   SDIV: "SDIV",         // Signed 64-bit divide
   UDIV: "UDIV",         // Unsigned 64-bit divide
 
-  // Shifts
+  // Shifts & Bitfields
   LSL: "LSL",           // Logical Shift Left
   LSR: "LSR",           // Logical Shift Right
   ASR: "ASR",           // Arithmetic Shift Right (preserves sign)
+  UBFM: "UBFM",         // Unsigned Bitfield Move (LSL/LSR imm, UXTB, UXTH, UBFX)
+  SBFM: "SBFM",         // Signed Bitfield Move (ASR imm, SXTB, SXTH, SXTW, SBFX)
 
   // Loads & Stores (Single)
-  LDR_IMM: "LDR_IMM",   // Load 64-bit register
-  STR_IMM: "STR_IMM",   // Store 64-bit register
-  LDRB_IMM: "LDRB_IMM", // Load 8-bit byte
-  STRB_IMM: "STRB_IMM", // Store 8-bit byte
-  LDRW_IMM: "LDRW_IMM", // Load 32-bit word
-  STRW_IMM: "STRW_IMM", // Store 32-bit word
+  LDR_IMM: "LDR_IMM",     // Load 64-bit register
+  STR_IMM: "STR_IMM",     // Store 64-bit register
+  LDRB_IMM: "LDRB_IMM",   // Load 8-bit unsigned byte
+  STRB_IMM: "STRB_IMM",   // Store 8-bit byte
+  LDRSB_IMM: "LDRSB_IMM", // Load 8-bit signed byte (sign-extending)
+  LDRH_IMM: "LDRH_IMM",   // Load 16-bit unsigned halfword
+  STRH_IMM: "STRH_IMM",   // Store 16-bit halfword
+  LDRSH_IMM: "LDRSH_IMM", // Load 16-bit signed halfword (sign-extending)
+  LDRW_IMM: "LDRW_IMM",   // Load 32-bit unsigned word
+  STRW_IMM: "STRW_IMM",   // Store 32-bit word
+  LDRSW_IMM: "LDRSW_IMM", // Load 32-bit signed word (sign-extending to 64-bit)
 
   // Loads & Stores (Pair / Stack Frames)
   STP: "STP",           // Store Pair 64-bit
@@ -43,6 +58,10 @@ export const InstructionType = {
 
   // Branches & Calls
   B_COND: "B_COND",     // Conditional relative branch
+  CBZ: "CBZ",           // Compare and Branch on Zero
+  CBNZ: "CBNZ",         // Compare and Branch on Non-Zero
+  TBZ: "TBZ",           // Test Bit and Branch on Zero
+  TBNZ: "TBNZ",         // Test Bit and Branch on Non-Zero
   B: "B",               // Unconditional relative branch
   BL: "BL",             // Branch with Link (Function call)
   BR: "BR",             // Branch to register (Indirect jump)
@@ -51,6 +70,8 @@ export const InstructionType = {
 
   // System
   SVC: "SVC",           // Supervisor Call (Syscall trap)
+  MRS: "MRS",           // Move System Register to general-purpose register (e.g. TPIDR_EL0)
+  MSR: "MSR",           // Move general-purpose register to System Register (e.g. TPIDR_EL0)
 
   UNKNOWN: "UNKNOWN",
 };
@@ -128,8 +149,9 @@ export class Decoder {
   static _decodeDataProcessingImmediate(raw) {
     const op1 = (raw >>> 23) & 0b111;
 
-    // ADR: bits [31:24] = 0x10
-    if (((raw >>> 24) & 0x9f) === 0x10) {
+    // ADR: bits [31:24] & 0x9f = 0x10, ADRP: bits [31:24] & 0x9f = 0x90
+    if (((raw >>> 24) & 0x9f) === 0x10 || ((raw >>> 24) & 0x9f) === 0x90) {
+      const isPage = ((raw >>> 31) & 1) === 1;
       const immlo = (raw >>> 29) & 0x3;
       const immhi = (raw >>> 5) & 0x7ffff;
       const rd = raw & 0x1f;
@@ -137,34 +159,48 @@ export class Decoder {
       let imm21 = (immhi << 2) | immlo;
       if (imm21 & 0x100000) imm21 -= 0x200000;
 
-      return {
-        type: InstructionType.ADR,
-        raw,
-        rd,
-        offsetBytes: imm21,
-        disassembly: `adr x${rd}, [offset ${imm21 >= 0 ? "+" : ""}${imm21}B]`,
-      };
+      if (isPage) {
+        return {
+          type: InstructionType.ADRP,
+          raw,
+          rd,
+          imm21,
+          offsetBytes: imm21 * 4096,
+          disassembly: `adrp x${rd}, [page ${imm21 >= 0 ? "+" : ""}${imm21 * 4096}B]`,
+        };
+      } else {
+        return {
+          type: InstructionType.ADR,
+          raw,
+          rd,
+          imm21,
+          offsetBytes: imm21,
+          disassembly: `adr x${rd}, [offset ${imm21 >= 0 ? "+" : ""}${imm21}B]`,
+        };
+      }
     }
 
-    // Move Wide Immediate (MOVZ / MOVN): op1 == 101
+    // Move Wide Immediate (MOVZ / MOVN / MOVK): op1 == 101
     if (op1 === 0b101) {
       const sf = (raw >>> 31) & 1;
-      const opc = (raw >>> 29) & 0x3; // 10 = MOVZ, 00 = MOVN
+      const opc = (raw >>> 29) & 0x3; // 10 = MOVZ, 00 = MOVN, 11 = MOVK
       const hw = (raw >>> 21) & 0x3;
       const imm16 = (raw >>> 5) & 0xffff;
       const rd = raw & 0x1f;
       const shift = hw * 16;
+      const regPrefix = sf ? "x" : "w";
 
       if (opc === 0b10) { // MOVZ
         const immValue = BigInt(imm16) << BigInt(shift);
         return {
           type: InstructionType.MOVZ,
           raw,
+          sf,
           rd,
           imm16,
           shift,
           immValue,
-          disassembly: `movz x${rd}, #${imm16}${shift > 0 ? `, lsl #${shift}` : ""}`,
+          disassembly: `movz ${regPrefix}${rd}, #${imm16}${shift > 0 ? `, lsl #${shift}` : ""}`,
         };
       } else if (opc === 0b00) { // MOVN
         const base = BigInt(imm16) << BigInt(shift);
@@ -172,11 +208,24 @@ export class Decoder {
         return {
           type: InstructionType.MOVN,
           raw,
+          sf,
           rd,
           imm16,
           shift,
           immValue,
-          disassembly: `movn x${rd}, #${imm16}${shift > 0 ? `, lsl #${shift}` : ""}`,
+          disassembly: `movn ${regPrefix}${rd}, #${imm16}${shift > 0 ? `, lsl #${shift}` : ""}`,
+        };
+      } else if (opc === 0b11) { // MOVK
+        const immValue = BigInt(imm16) << BigInt(shift);
+        return {
+          type: InstructionType.MOVK,
+          raw,
+          sf,
+          rd,
+          imm16,
+          shift,
+          immValue,
+          disassembly: `movk ${regPrefix}${rd}, #${imm16}${shift > 0 ? `, lsl #${shift}` : ""}`,
         };
       }
     }
@@ -229,6 +278,63 @@ export class Decoder {
       };
     }
 
+    // Bitfield (SBFM / UBFM: immediate shifts LSL/LSR/ASR and UXTB/UXTH/SXTB/SXTH/SXTW): op1 == 110
+    if (op1 === 0b110) {
+      const sf = (raw >>> 31) & 1;
+      const opc = (raw >>> 29) & 0b11; // 00 = SBFM, 10 = UBFM
+      const immr = (raw >>> 16) & 0x3f;
+      const imms = (raw >>> 10) & 0x3f;
+      const rn = (raw >>> 5) & 0x1f;
+      const rd = raw & 0x1f;
+      const reg = sf ? "x" : "w";
+      const maxBit = sf ? 63 : 31;
+
+      if (opc === 0b10) { // UBFM
+        let disasm = `ubfm ${reg}${rd}, ${reg}${rn}, #${immr}, #${imms}`;
+        if (imms === maxBit) {
+          disasm = `lsr ${reg}${rd}, ${reg}${rn}, #${immr}`;
+        } else if (imms + 1 === immr) {
+          const shift = (maxBit + 1) - immr;
+          disasm = `lsl ${reg}${rd}, ${reg}${rn}, #${shift}`;
+        } else if (immr === 0 && imms === 7) {
+          disasm = `uxtb w${rd}, w${rn}`;
+        } else if (immr === 0 && imms === 15) {
+          disasm = `uxth w${rd}, w${rn}`;
+        }
+        return {
+          type: InstructionType.UBFM,
+          raw,
+          sf,
+          rd,
+          rn,
+          immr,
+          imms,
+          disassembly: disasm,
+        };
+      } else if (opc === 0b00) { // SBFM
+        let disasm = `sbfm ${reg}${rd}, ${reg}${rn}, #${immr}, #${imms}`;
+        if (imms === maxBit) {
+          disasm = `asr ${reg}${rd}, ${reg}${rn}, #${immr}`;
+        } else if (immr === 0 && imms === 7) {
+          disasm = `sxtb ${reg}${rd}, w${rn}`;
+        } else if (immr === 0 && imms === 15) {
+          disasm = `sxth ${reg}${rd}, w${rn}`;
+        } else if (immr === 0 && imms === 31 && sf === 1) {
+          disasm = `sxtw x${rd}, w${rn}`;
+        }
+        return {
+          type: InstructionType.SBFM,
+          raw,
+          sf,
+          rd,
+          rn,
+          immr,
+          imms,
+          disassembly: disasm,
+        };
+      }
+    }
+
     return { type: InstructionType.UNKNOWN, raw, disassembly: `unknown imm 0x${raw.toString(16)}` };
   }
 
@@ -250,6 +356,53 @@ export class Decoder {
         imm19,
         offsetBytes,
         disassembly: `b.${condName} [offset ${offsetBytes >= 0 ? "+" : ""}${offsetBytes}B]`,
+      };
+    }
+
+    // 1b. Compare and Branch on Zero / Non-Zero (CBZ / CBNZ): bits [30:25] = 0b011010
+    if (((raw >>> 25) & 0x3f) === 0b011010) {
+      const sf = (raw >>> 31) & 1;
+      const op = (raw >>> 24) & 1; // 0 = CBZ, 1 = CBNZ
+      let imm19 = (raw >>> 5) & 0x7ffff;
+      if (imm19 & 0x40000) imm19 -= 0x80000;
+      const offsetBytes = imm19 * 4;
+      const rt = raw & 0x1f;
+      const regPrefix = sf ? "x" : "w";
+      const mnem = op === 1 ? "cbnz" : "cbz";
+
+      return {
+        type: op === 1 ? InstructionType.CBNZ : InstructionType.CBZ,
+        raw,
+        sf,
+        rt,
+        imm19,
+        offsetBytes,
+        disassembly: `${mnem} ${regPrefix}${rt}, [offset ${offsetBytes >= 0 ? "+" : ""}${offsetBytes}B]`,
+      };
+    }
+
+    // 1c. Test Bit and Branch on Zero / Non-Zero (TBZ / TBNZ): bits [30:25] = 0b011011
+    if (((raw >>> 25) & 0x3f) === 0b011011) {
+      const b5 = (raw >>> 31) & 1;
+      const op = (raw >>> 24) & 1; // 0 = TBZ, 1 = TBNZ
+      const b40 = (raw >>> 19) & 0x1f;
+      const bitPos = (b5 << 5) | b40;
+      let imm14 = (raw >>> 5) & 0x3fff;
+      if (imm14 & 0x2000) imm14 -= 0x4000;
+      const offsetBytes = imm14 * 4;
+      const rt = raw & 0x1f;
+      const regPrefix = b5 ? "x" : "w";
+      const mnem = op === 1 ? "tbnz" : "tbz";
+
+      return {
+        type: op === 1 ? InstructionType.TBNZ : InstructionType.TBZ,
+        raw,
+        sf: b5,
+        rt,
+        bitPos,
+        imm14,
+        offsetBytes,
+        disassembly: `${mnem} ${regPrefix}${rt}, #${bitPos}, [offset ${offsetBytes >= 0 ? "+" : ""}${offsetBytes}B]`,
       };
     }
 
@@ -309,6 +462,34 @@ export class Decoder {
       };
     }
 
+    // 6. System Register Move (MRS / MSR): bits [31:22] = 0b1101010100 (0x354)
+    if ((raw >>> 22) === 0b1101010100) {
+      const lBit = (raw >>> 21) & 1; // 0 = MSR (write sysreg), 1 = MRS (read sysreg)
+      const sysreg = (raw >>> 5) & 0xffff;
+      const rt = raw & 0x1f;
+      // TPIDR_EL0 encoding in bits [20:5]: op0=3, op1=3, CRn=13, CRm=0, op2=2 -> 0xde82
+      const sysregName = sysreg === 0xde82 ? "tpidr_el0" : `sysreg_0x${sysreg.toString(16)}`;
+      if (lBit === 1) {
+        return {
+          type: InstructionType.MRS,
+          raw,
+          rt,
+          sysreg,
+          sysregName,
+          disassembly: `mrs x${rt}, ${sysregName}`,
+        };
+      } else {
+        return {
+          type: InstructionType.MSR,
+          raw,
+          rt,
+          sysreg,
+          sysregName,
+          disassembly: `msr ${sysregName}, x${rt}`,
+        };
+      }
+    }
+
     return { type: InstructionType.UNKNOWN, raw, disassembly: `unknown branch/sys 0x${raw.toString(16)}` };
   }
 
@@ -319,23 +500,54 @@ export class Decoder {
     const s = (raw >>> 29) & 1;
 
     // Multiply / Divide (3-source or 2-source data processing)
-    // MADD/MUL: bits [28:24] = 11011, bits [23:21] = 000
+    // MADD / MSUB / MUL: bits [28:24] = 11011, bits [23:21] = 000
     if (((raw >>> 24) & 0b11111) === 0b11011) {
       const op31 = (raw >>> 21) & 0b111;
       const rm = (raw >>> 16) & 0x1f;
+      const o0 = (raw >>> 15) & 1; // 0 = MADD/MUL, 1 = MSUB/MNEG
       const ra = (raw >>> 10) & 0x1f;
       const rn = (raw >>> 5) & 0x1f;
       const rd = raw & 0x1f;
+      const regPrefix = sf ? "x" : "w";
 
-      if (op31 === 0b000 && ra === 31) { // MADD xd, xn, xm, xzr is MUL xd, xn, xm
-        return {
-          type: InstructionType.MUL,
-          raw,
-          rd,
-          rn,
-          rm,
-          disassembly: `mul x${rd}, x${rn}, x${rm}`,
-        };
+      if (op31 === 0b000) {
+        if (o0 === 0 && ra === 31) { // MADD xd, xn, xm, xzr is MUL xd, xn, xm
+          return {
+            type: InstructionType.MUL,
+            raw,
+            sf,
+            rd,
+            rn,
+            rm,
+            ra: 31,
+            disassembly: `mul ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}`,
+          };
+        } else if (o0 === 0) {
+          return {
+            type: InstructionType.MADD,
+            raw,
+            sf,
+            rd,
+            rn,
+            rm,
+            ra,
+            disassembly: `madd ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}, ${regPrefix}${ra}`,
+          };
+        } else {
+          const disasm = ra === 31
+            ? `mneg ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}`
+            : `msub ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}, ${regPrefix}${ra}`;
+          return {
+            type: InstructionType.MSUB,
+            raw,
+            sf,
+            rd,
+            rn,
+            rm,
+            ra,
+            disassembly: disasm,
+          };
+        }
       }
     }
 
@@ -345,18 +557,56 @@ export class Decoder {
       const opcode = (raw >>> 10) & 0b111111;
       const rn = (raw >>> 5) & 0x1f;
       const rd = raw & 0x1f;
+      const regPrefix = sf ? "x" : "w";
 
       if (opcode === 0b000010) { // UDIV
-        return { type: InstructionType.UDIV, raw, rd, rn, rm, disassembly: `udiv x${rd}, x${rn}, x${rm}` };
+        return { type: InstructionType.UDIV, raw, sf, rd, rn, rm, disassembly: `udiv ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
       } else if (opcode === 0b000011) { // SDIV
-        return { type: InstructionType.SDIV, raw, rd, rn, rm, disassembly: `sdiv x${rd}, x${rn}, x${rm}` };
+        return { type: InstructionType.SDIV, raw, sf, rd, rn, rm, disassembly: `sdiv ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
       } else if (opcode === 0b001000) { // LSLV
-        return { type: InstructionType.LSL, raw, rd, rn, rm, isRegShift: true, disassembly: `lsl x${rd}, x${rn}, x${rm}` };
+        return { type: InstructionType.LSL, raw, sf, rd, rn, rm, isRegShift: true, disassembly: `lsl ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
       } else if (opcode === 0b001001) { // LSRV
-        return { type: InstructionType.LSR, raw, rd, rn, rm, isRegShift: true, disassembly: `lsr x${rd}, x${rn}, x${rm}` };
+        return { type: InstructionType.LSR, raw, sf, rd, rn, rm, isRegShift: true, disassembly: `lsr ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
       } else if (opcode === 0b001010) { // ASRV
-        return { type: InstructionType.ASR, raw, rd, rn, rm, isRegShift: true, disassembly: `asr x${rd}, x${rn}, x${rm}` };
+        return { type: InstructionType.ASR, raw, sf, rd, rn, rm, isRegShift: true, disassembly: `asr ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
       }
+    }
+
+    // Conditional Select: bits [30:21] = 00 11010100 (0x0d4)
+    if (((raw >>> 21) & 0x3ff) === 0x0d4) {
+      const rm = (raw >>> 16) & 0x1f;
+      const cond = (raw >>> 12) & 0xf;
+      const op2 = (raw >>> 10) & 0x3;
+      const rn = (raw >>> 5) & 0x1f;
+      const rd = raw & 0x1f;
+
+      let type = InstructionType.CSEL;
+      let name = "csel";
+      if (op2 === 0b01) { type = InstructionType.CSINC; name = "csinc"; }
+      else if (op2 === 0b10) { type = InstructionType.CSINV; name = "csinv"; }
+      else if (op2 === 0b11) { type = InstructionType.CSNEG; name = "csneg"; }
+
+      const condName = ConditionNames[cond] || `cond_${cond}`;
+      const regPrefix = sf ? "x" : "w";
+      let disasm = `${name} ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}, ${condName}`;
+
+      // CSET alias: csinc xd, xzr, xzr, invert(cond)
+      if (type === InstructionType.CSINC && rn === 31 && rm === 31) {
+        const invCondName = ConditionNames[cond ^ 1] || `cond_${cond ^ 1}`;
+        disasm = `cset ${regPrefix}${rd}, ${invCondName}`;
+      }
+
+      return {
+        type,
+        raw,
+        sf,
+        rd,
+        rn,
+        rm,
+        cond,
+        op2,
+        disassembly: disasm,
+      };
     }
 
     // Add / Subtract (shifted register): bits [28:24] = 01011
@@ -366,6 +616,7 @@ export class Decoder {
       const imm6 = (raw >>> 10) & 0x3f;
       const rn = (raw >>> 5) & 0x1f;
       const rd = raw & 0x1f;
+      const regPrefix = sf ? "x" : "w";
 
       if (op === 0 && s === 0) {
         return {
@@ -377,7 +628,7 @@ export class Decoder {
           rm,
           shift,
           imm6,
-          disassembly: `add x${rd}, x${rn}, x${rm}${imm6 > 0 ? `, lsl #${imm6}` : ""}`,
+          disassembly: `add ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}${imm6 > 0 ? `, lsl #${imm6}` : ""}`,
         };
       } else if (op === 1 && s === 0) {
         return {
@@ -389,13 +640,13 @@ export class Decoder {
           rm,
           shift,
           imm6,
-          disassembly: `sub x${rd}, x${rn}, x${rm}${imm6 > 0 ? `, lsl #${imm6}` : ""}`,
+          disassembly: `sub ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}${imm6 > 0 ? `, lsl #${imm6}` : ""}`,
         };
       } else if (op === 1 && s === 1) { // SUBS / CMP register
         const mnemonic = (rd === 31) ? "cmp" : "subs";
         const disasm = (rd === 31)
-          ? `cmp x${rn}, x${rm}${imm6 > 0 ? `, lsl #${imm6}` : ""}`
-          : `subs x${rd}, x${rn}, x${rm}${imm6 > 0 ? `, lsl #${imm6}` : ""}`;
+          ? `cmp ${regPrefix}${rn}, ${regPrefix}${rm}${imm6 > 0 ? `, lsl #${imm6}` : ""}`
+          : `subs ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}${imm6 > 0 ? `, lsl #${imm6}` : ""}`;
         return {
           type: InstructionType.SUBS_REG,
           raw,
@@ -417,10 +668,11 @@ export class Decoder {
       const rn = (raw >>> 5) & 0x1f;
       const rd = raw & 0x1f;
       const nBit = (raw >>> 21) & 1; // 1 for NOT (ORN, EON, BIC)
+      const regPrefix = sf ? "x" : "w";
 
       // AND: op == 0, s == 0, N == 0
       if (op === 0 && s === 0 && nBit === 0) {
-        return { type: InstructionType.AND_REG, raw, rd, rn, rm, disassembly: `and x${rd}, x${rn}, x${rm}` };
+        return { type: InstructionType.AND_REG, raw, sf, rd, rn, rm, disassembly: `and ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
       }
 
       // ORR / MOV: op == 0, s == 1, N == 0
@@ -429,21 +681,22 @@ export class Decoder {
         return {
           type: InstructionType.ORR_REG,
           raw,
+          sf,
           rd,
           rn,
           rm,
-          disassembly: isMov ? `mov x${rd}, x${rm}` : `orr x${rd}, x${rn}, x${rm}`,
+          disassembly: isMov ? `mov ${regPrefix}${rd}, ${regPrefix}${rm}` : `orr ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}`,
         };
       }
 
       // MVN (ORN xd, xzr, xm): op == 0, s == 1, N == 1
       if (op === 0 && s === 1 && nBit === 1 && rn === 31) {
-        return { type: InstructionType.MVN_REG, raw, rd, rm, disassembly: `mvn x${rd}, x${rm}` };
+        return { type: InstructionType.MVN_REG, raw, sf, rd, rm, disassembly: `mvn ${regPrefix}${rd}, ${regPrefix}${rm}` };
       }
 
       // EOR (XOR): op == 1, s == 0, N == 0
       if (op === 1 && s === 0 && nBit === 0) {
-        return { type: InstructionType.EOR_REG, raw, rd, rn, rm, disassembly: `eor x${rd}, x${rn}, x${rm}` };
+        return { type: InstructionType.EOR_REG, raw, sf, rd, rn, rm, disassembly: `eor ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
       }
     }
 
@@ -493,41 +746,117 @@ export class Decoder {
       };
     }
 
-    // 4.2 Load / Store Register (Unsigned immediate offset)
+    // 4.2 Load / Store Register (Single: Unsigned immediate, Unscaled LDUR/STUR, Pre/Post-index, and Register Offset)
     const size = (raw >>> 30) & 0b11;
     const opc = (raw >>> 22) & 0b11;
-    const imm12 = (raw >>> 10) & 0xfff;
+    const isUnsignedImm = ((raw >>> 24) & 1) === 1;
     const rn = (raw >>> 5) & 0x1f;
     const rt = raw & 0x1f;
     const baseName = (rn === 31) ? "sp" : `x${rn}`;
 
-    // 64-bit: size = 11, scale = 8
+    let offsetBytes = 0;
+    let preIndex = false;
+    let postIndex = false;
+    let unscaled = false;
+    let isRegOffset = false;
+    let rm = 0;
+    let option = 0;
+    let regShift = 0;
+    let addrStr = "";
+
+    if (isUnsignedImm) {
+      const imm12 = (raw >>> 10) & 0xfff;
+      offsetBytes = imm12 << size;
+      addrStr = `[${baseName}${offsetBytes !== 0 ? `, #${offsetBytes}` : ""}]`;
+    } else if (((raw >>> 21) & 1) === 0) {
+      let imm9 = (raw >>> 12) & 0x1ff;
+      if (imm9 & 0x100) imm9 -= 0x200; // sign-extend 9-bit byte offset
+      offsetBytes = imm9;
+      const addrMode = (raw >>> 10) & 0b11;
+      if (addrMode === 0b00) {
+        unscaled = true;
+        addrStr = `[${baseName}${offsetBytes !== 0 ? `, #${offsetBytes}` : ""}]`;
+      } else if (addrMode === 0b01) {
+        postIndex = true;
+        addrStr = `[${baseName}], #${offsetBytes}`;
+      } else if (addrMode === 0b11) {
+        preIndex = true;
+        addrStr = `[${baseName}, #${offsetBytes}]!`;
+      } else {
+        return { type: InstructionType.UNKNOWN, raw, disassembly: `unknown ldr/str 0x${raw.toString(16)}` };
+      }
+    } else if (((raw >>> 21) & 1) === 1 && ((raw >>> 10) & 0b11) === 0b10) {
+      // Register Offset: [Xn, Rm{, extend {#amount}}]
+      isRegOffset = true;
+      rm = (raw >>> 16) & 0x1f;
+      option = (raw >>> 13) & 0b111; // 010=uxtw, 011=lsl, 110=sxtw, 111=sxtx
+      const sBit = (raw >>> 12) & 1;
+      regShift = sBit ? size : 0;
+      const rmIs32 = (option === 0b010 || option === 0b110);
+      const rmName = `${rmIs32 ? "w" : "x"}${rm}`;
+      let extStr = "";
+      if (option === 0b010) extStr = `, uxtw${regShift ? ` #${regShift}` : ""}`;
+      else if (option === 0b110) extStr = `, sxtw${regShift ? ` #${regShift}` : ""}`;
+      else if (option === 0b111) extStr = `, sxtx${regShift ? ` #${regShift}` : ""}`;
+      else if (regShift > 0) extStr = `, lsl #${regShift}`;
+      addrStr = `[${baseName}, ${rmName}${extStr}]`;
+    } else {
+      return { type: InstructionType.UNKNOWN, raw, disassembly: `unknown ldr/str 0x${raw.toString(16)}` };
+    }
+
+    const commonProps = { raw, rt, rn, offsetBytes, preIndex, postIndex, unscaled, isRegOffset, rm, option, regShift };
+
+    // 64-bit: size = 11
     if (size === 0b11) {
-      const offsetBytes = imm12 * 8;
-      if (opc === 0b00) { // STR 64-bit
-        return { type: InstructionType.STR_IMM, raw, rt, rn, offsetBytes, disassembly: `str x${rt}, [${baseName}${offsetBytes > 0 ? `, #${offsetBytes}` : ""}]` };
-      } else if (opc === 0b01) { // LDR 64-bit
-        return { type: InstructionType.LDR_IMM, raw, rt, rn, offsetBytes, disassembly: `ldr x${rt}, [${baseName}${offsetBytes > 0 ? `, #${offsetBytes}` : ""}]` };
+      const mnemPrefix = unscaled ? (opc === 0b00 ? "stur" : "ldur") : (opc === 0b00 ? "str" : "ldr");
+      if (opc === 0b00) {
+        return { type: InstructionType.STR_IMM, ...commonProps, disassembly: `${mnemPrefix} x${rt}, ${addrStr}` };
+      } else if (opc === 0b01) {
+        return { type: InstructionType.LDR_IMM, ...commonProps, disassembly: `${mnemPrefix} x${rt}, ${addrStr}` };
       }
     }
 
-    // 32-bit: size = 10, scale = 4
+    // 32-bit: size = 10 (opc=00 STRW, opc=01 LDRW, opc=10 LDRSW 64-bit sign-extended)
     if (size === 0b10) {
-      const offsetBytes = imm12 * 4;
-      if (opc === 0b00) { // STRW 32-bit
-        return { type: InstructionType.STRW_IMM, raw, rt, rn, offsetBytes, disassembly: `str w${rt}, [${baseName}${offsetBytes > 0 ? `, #${offsetBytes}` : ""}]` };
-      } else if (opc === 0b01) { // LDRW 32-bit
-        return { type: InstructionType.LDRW_IMM, raw, rt, rn, offsetBytes, disassembly: `ldr w${rt}, [${baseName}${offsetBytes > 0 ? `, #${offsetBytes}` : ""}]` };
+      if (opc === 0b00) {
+        const mnem = unscaled ? "stur" : "str";
+        return { type: InstructionType.STRW_IMM, ...commonProps, disassembly: `${mnem} w${rt}, ${addrStr}` };
+      } else if (opc === 0b01) {
+        const mnem = unscaled ? "ldur" : "ldr";
+        return { type: InstructionType.LDRW_IMM, ...commonProps, disassembly: `${mnem} w${rt}, ${addrStr}` };
+      } else if (opc === 0b10) {
+        const mnem = unscaled ? "ldursw" : "ldrsw";
+        return { type: InstructionType.LDRSW_IMM, ...commonProps, sf: 1, disassembly: `${mnem} x${rt}, ${addrStr}` };
       }
     }
 
-    // 8-bit Byte: size = 00, scale = 1
+    // 16-bit Halfword: size = 01 (opc=00 STRH, opc=01 LDRH, opc=10 LDRSH x, opc=11 LDRSH w)
+    if (size === 0b01) {
+      if (opc === 0b00) {
+        const mnem = unscaled ? "sturh" : "strh";
+        return { type: InstructionType.STRH_IMM, ...commonProps, disassembly: `${mnem} w${rt}, ${addrStr}` };
+      } else if (opc === 0b01) {
+        const mnem = unscaled ? "ldurh" : "ldrh";
+        return { type: InstructionType.LDRH_IMM, ...commonProps, disassembly: `${mnem} w${rt}, ${addrStr}` };
+      } else if (opc === 0b10 || opc === 0b11) {
+        const sf = (opc === 0b10) ? 1 : 0;
+        const mnem = unscaled ? "ldursh" : "ldrsh";
+        return { type: InstructionType.LDRSH_IMM, ...commonProps, sf, disassembly: `${mnem} ${sf ? "x" : "w"}${rt}, ${addrStr}` };
+      }
+    }
+
+    // 8-bit Byte: size = 00 (opc=00 STRB, opc=01 LDRB, opc=10 LDRSB x, opc=11 LDRSB w)
     if (size === 0b00) {
-      const offsetBytes = imm12;
-      if (opc === 0b00) { // STRB 8-bit
-        return { type: InstructionType.STRB_IMM, raw, rt, rn, offsetBytes, disassembly: `strb w${rt}, [${baseName}${offsetBytes > 0 ? `, #${offsetBytes}` : ""}]` };
-      } else if (opc === 0b01) { // LDRB 8-bit
-        return { type: InstructionType.LDRB_IMM, raw, rt, rn, offsetBytes, disassembly: `ldrb w${rt}, [${baseName}${offsetBytes > 0 ? `, #${offsetBytes}` : ""}]` };
+      if (opc === 0b00) {
+        const mnem = unscaled ? "sturb" : "strb";
+        return { type: InstructionType.STRB_IMM, ...commonProps, disassembly: `${mnem} w${rt}, ${addrStr}` };
+      } else if (opc === 0b01) {
+        const mnem = unscaled ? "ldurb" : "ldrb";
+        return { type: InstructionType.LDRB_IMM, ...commonProps, disassembly: `${mnem} w${rt}, ${addrStr}` };
+      } else if (opc === 0b10 || opc === 0b11) {
+        const sf = (opc === 0b10) ? 1 : 0;
+        const mnem = unscaled ? "ldursb" : "ldrsb";
+        return { type: InstructionType.LDRSB_IMM, ...commonProps, sf, disassembly: `${mnem} ${sf ? "x" : "w"}${rt}, ${addrStr}` };
       }
     }
 

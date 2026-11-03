@@ -46,6 +46,12 @@ const BINARY_DESCRIPTIONS = {
     title: "Math & Subroutines",
     desc: "Tests subroutine calling (BL), stack preservation (STP/LDP), MUL, and UDIV.",
     category: "Functions & Math"
+  },
+  "heap_demo.elf": {
+    name: "heap_demo.elf",
+    title: "Static Libc & Heap Demo",
+    desc: "Demonstrates dynamic heap expansion via sys_brk (214), string operations, and stdout via sys_write (64).",
+    category: "Static Libc & Syscalls"
   }
 };
 

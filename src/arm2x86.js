@@ -101,6 +101,31 @@ export class Arm2X86Translator {
           break;
         }
 
+        case InstructionType.ADR:
+        case InstructionType.ADRP: {
+          const rd = this.reg(decoded.rd);
+          const regCode = X86_REG_INDEX[rd] ?? 0;
+          const targetAddr = decoded.type === InstructionType.ADRP
+            ? ((pc & ~0xfff) + Number(decoded.offsetBytes))
+            : (pc + Number(decoded.offsetBytes));
+          x86Asm = `mov ${rd}, 0x${targetAddr.toString(16)}`;
+          x86Bytes = [
+            0x48, 0xc7, 0xc0 + regCode,
+            targetAddr & 0xff, (targetAddr >>> 8) & 0xff, (targetAddr >>> 16) & 0xff, (targetAddr >>> 24) & 0xff
+          ];
+          break;
+        }
+
+        case InstructionType.CSEL: {
+          const rd = this.reg(decoded.rd);
+          const rn = this.reg(decoded.rn);
+          const rm = this.reg(decoded.rm);
+          const cmovOp = decoded.cond === ConditionCode.EQ ? "cmove" : "cmovne";
+          x86Asm = `mov ${rd}, ${rm} ; ${cmovOp} ${rd}, ${rn}`;
+          x86Bytes = [0x48, 0x89, 0xd0, 0x48, 0x0f, decoded.cond === ConditionCode.EQ ? 0x44 : 0x45, 0xc3];
+          break;
+        }
+
         case InstructionType.ADD_IMM: {
           const rd = this.reg(decoded.rd);
           const rn = this.reg(decoded.rn);
@@ -215,6 +240,26 @@ export class Arm2X86Translator {
             x86Asm = `mov ${rd}, ${rn} ; imul ${rd}, ${rm}`;
             x86Bytes = [0x48, 0x89, 0xc0 + (base << 3) + dst, 0x48, 0x0f, 0xaf, 0xc0 + (dst << 3) + src];
           }
+          break;
+        }
+
+        case InstructionType.MADD: {
+          const rd = this.reg(decoded.rd);
+          const rn = this.reg(decoded.rn);
+          const rm = this.reg(decoded.rm);
+          const ra = this.reg(decoded.ra);
+          x86Asm = `mov ${rd}, ${rn} ; imul ${rd}, ${rm} ; add ${rd}, ${ra}`;
+          x86Bytes = [0x48, 0x89, 0xd8, 0x48, 0x0f, 0xaf, 0xc1, 0x48, 0x01, 0xd0];
+          break;
+        }
+
+        case InstructionType.MSUB: {
+          const rd = this.reg(decoded.rd);
+          const rn = this.reg(decoded.rn);
+          const rm = this.reg(decoded.rm);
+          const ra = this.reg(decoded.ra);
+          x86Asm = `mov ${rd}, ${rn} ; imul ${rd}, ${rm} ; neg ${rd} ; add ${rd}, ${ra}`;
+          x86Bytes = [0x48, 0x89, 0xd8, 0x48, 0x0f, 0xaf, 0xc1, 0x48, 0xf7, 0xd8, 0x48, 0x01, 0xd0];
           break;
         }
 

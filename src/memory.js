@@ -56,6 +56,20 @@ export class Memory {
     this.lastWritten.add(numAddr);
   }
 
+  // Read 16-bit little-endian integer
+  read16(addr) {
+    const b0 = this.read8(addr);
+    const b1 = this.read8(addr + 1);
+    return ((b0) | (b1 << 8)) >>> 0;
+  }
+
+  // Write 16-bit little-endian integer
+  write16(addr, value) {
+    const val = value & 0xffff;
+    this.write8(addr, val & 0xff);
+    this.write8(addr + 1, (val >>> 8) & 0xff);
+  }
+
   // Read 32-bit little-endian integer
   read32(addr) {
     const b0 = this.read8(addr);

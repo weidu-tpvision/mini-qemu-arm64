@@ -90,9 +90,19 @@ export class StaticRecompiler {
           lines.push(`${indent}x[${decoded.rd}] = ${decoded.immValue}n; // ${decoded.disassembly} (${hexPC})`);
           break;
 
+        case InstructionType.MOVK:
+          lines.push(`${indent}x[${decoded.rd}] = (x[${decoded.rd}] & ~(0xffffn << ${decoded.shift}n)) | (${BigInt(decoded.imm16) << BigInt(decoded.shift)}n); // ${decoded.disassembly}`);
+          break;
+
         case InstructionType.ADR:
           lines.push(`${indent}x[${decoded.rd}] = 0x${(pc + decoded.offsetBytes).toString(16)}n; // ${decoded.disassembly}`);
           break;
+
+        case InstructionType.ADRP: {
+          const pageBase = (pc & ~0xfff) + Number(decoded.offsetBytes);
+          lines.push(`${indent}x[${decoded.rd}] = 0x${pageBase.toString(16)}n; // ${decoded.disassembly}`);
+          break;
+        }
 
         case InstructionType.ADD_IMM:
           lines.push(`${indent}${spOrReg(decoded.rd)} = ${spOrReg(decoded.rn)} + ${decoded.immValue}n; // ${decoded.disassembly}`);
@@ -112,6 +122,14 @@ export class StaticRecompiler {
 
         case InstructionType.MUL:
           lines.push(`${indent}x[${decoded.rd}] = BigInt.asUintN(64, ${regExpr(decoded.rn)} * ${regExpr(decoded.rm)}); // ${decoded.disassembly}`);
+          break;
+
+        case InstructionType.MADD:
+          lines.push(`${indent}x[${decoded.rd}] = BigInt.asUintN(64, ${regExpr(decoded.ra)} + (${regExpr(decoded.rn)} * ${regExpr(decoded.rm)})); // ${decoded.disassembly}`);
+          break;
+
+        case InstructionType.MSUB:
+          lines.push(`${indent}x[${decoded.rd}] = BigInt.asUintN(64, ${regExpr(decoded.ra)} - (${regExpr(decoded.rn)} * ${regExpr(decoded.rm)})); // ${decoded.disassembly}`);
           break;
 
         case InstructionType.UDIV:
@@ -160,10 +178,29 @@ export class StaticRecompiler {
         case InstructionType.LDP:
         case InstructionType.STR_IMM:
         case InstructionType.LDR_IMM:
+        case InstructionType.STRW_IMM:
+        case InstructionType.LDRW_IMM:
+        case InstructionType.LDRSW_IMM:
+        case InstructionType.STRH_IMM:
+        case InstructionType.LDRH_IMM:
+        case InstructionType.LDRSH_IMM:
         case InstructionType.STRB_IMM:
         case InstructionType.LDRB_IMM:
+        case InstructionType.LDRSB_IMM:
           lines.push(`${indent}/* Memory/Stack op (${hexPC}): ${decoded.disassembly} */`);
           break;
+
+        case InstructionType.CSEL: {
+          const condExpr = decoded.cond === ConditionCode.EQ ? "flagZ" : "!flagZ";
+          lines.push(`${indent}x[${decoded.rd}] = (${condExpr}) ? ${regExpr(decoded.rn)} : ${regExpr(decoded.rm)}; // ${decoded.disassembly}`);
+          break;
+        }
+
+        case InstructionType.CSINC: {
+          const condExpr = decoded.cond === ConditionCode.EQ ? "flagZ" : "!flagZ";
+          lines.push(`${indent}x[${decoded.rd}] = (${condExpr}) ? ${regExpr(decoded.rn)} : (${regExpr(decoded.rm)} + 1n); // ${decoded.disassembly}`);
+          break;
+        }
 
         case InstructionType.BL: {
           const targetHex = `0x${(pc + decoded.offsetBytes).toString(16).padStart(8, "0")}`;
@@ -203,8 +240,8 @@ export class StaticRecompiler {
         }
 
         case InstructionType.SVC:
-          lines.push(`${indent}// Supervisor Call (${decoded.disassembly}): check X8 syscall (64=write, 93=exit)`);
-          lines.push(`${indent}if (x[8] === 93n) return Number(x[0]);`);
+          lines.push(`${indent}// Supervisor Call (${decoded.disassembly}): check X8 syscall (64=write, 93/94=exit)`);
+          lines.push(`${indent}if (x[8] === 93n || x[8] === 94n) return Number(x[0]);`);
           break;
 
         default:

@@ -48,41 +48,55 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
   * Clean, standards-compliant ARM64 opcode decoding based on the official ARM Architecture Reference Manual.
   * Categorizes instructions by major groups (Data Processing Immediate, Register, Branches, Loads/Stores, System).
   * Evaluates all 15 ARM64 condition codes (`EQ`, `NE`, `GE`, `LT`, `GT`, `LE`, etc.).
-* **Standard ELF64 Binary Loader:**
+* **Standard ELF64 Binary Loader & Linux Process ABI:**
   * Validates ELF magic bytes (`0x7F 'E' 'L' 'F'`), 64-bit class, little-endian format, and AArch64 machine identifier (`0x00B7`).
-  * Parses `PT_LOAD` program headers and loads segments into virtual RAM.
-* **Linux ARM64 System Call Trapping (`SVC #0`):**
-  * `sys_write` (syscall 64): Intercepts string writes to `stdout` (fd 1) and outputs directly to the host console.
-  * `sys_exit` (syscall 93): Intercepts process termination and extracts the return code from `X0`.
+  * Parses `PT_LOAD` program headers, loads segments into virtual RAM, and zero-initializes `.bss` (`p_memsz > p_filesz`).
+  * Initializes a standards-compliant 16-byte aligned Linux ABI stack frame (`argc`, `argv`, `envp`, and `auxv` entries `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ`, `AT_ENTRY`, `AT_RANDOM`).
+* **Linux ARM64 System Call Trapping (`SVC #0`) & Virtual File System (VFS):**
+  * `sys_openat` (56), `sys_close` (57), `sys_lseek` (62), `sys_fstat` (80), `sys_newfstatat` (79), `sys_unlinkat` (35) & `sys_getcwd` (17): Full in-memory Virtual File System (`mountFile` / `readVfsFile`) and file descriptor table (`fd >= 3`) supporting `fopen()`, `fread()`, `fwrite()`, `fseek()`, `stat()`, and `fclose()`.
+  * `sys_write` (64) & `sys_writev` (66): Intercepts contiguous and scatter-gather (`struct iovec`) writes to `stdout`/`stderr` and open VFS files.
+  * `sys_read` (63): Intercepts reads from `stdin` (fd 0) and open VFS files (`fd >= 3`).
+  * `sys_exit` (93) & `sys_exit_group` (94): Intercepts process/thread-group termination and extracts the return code from `X0`.
+  * `sys_brk` (214): Manages dynamic heap memory allocation (used by `malloc()`).
+  * `sys_mmap` (222), `sys_munmap` (215) & `sys_mprotect` (226): Supports anonymous virtual memory mapping.
+  * `sys_clock_gettime` (113), `sys_uname` (160), `sys_getpid` (172), `sys_gettid` (178), `sys_set_tid_address` (96) & `sys_getrandom` (278): Full runtime support for statically-linked `libc` (`musl` / `nolibc`).
 * **Dual Execution Modes:**
   1. **Interactive Interpreter:** Step-by-step cycle execution with full register dumps.
   2. **Static AOT Recompiler:** Translates ARM64 binary blocks into native host code, providing an **81.5x performance speedup**!
 
 ---
 
-## Supported Instruction Set (32+ Core Instructions)
+## Supported Instruction Set (48+ Core Instructions, 32-bit `W` & 64-bit `X` Widths)
 
 | Category | Instructions | Description & Semantics |
 | :--- | :--- | :--- |
-| **Immediate Arithmetic** | `MOVZ`, `MOVN` | Move wide immediate (positive and bitwise-inverted) |
+| **Immediate Arithmetic** | `MOVZ`, `MOVN`, `MOVK` | Move wide immediate (zero, bitwise-inverted, and 16-bit keep) |
 | | `ADD (imm)`, `SUB (imm)` | Add/Subtract 12-bit immediate with optional shift |
 | | `SUBS (imm)`, `CMP (imm)`| Subtract immediate and set condition flags (`NZCV`) |
-| **Register Arithmetic** | `ADD (reg)`, `SUB (reg)` | 64-bit register addition and subtraction |
-| | `SUBS (reg)`, `CMP (reg)`| Register subtraction setting flags (`NZCV`) |
-| **Math (Mul & Div)** | `MUL` | 64-bit integer multiplication (`MADD Xd, Xn, Xm, XZR`) |
-| | `SDIV`, `UDIV` | Signed and Unsigned 64-bit integer division |
+| **Register Arithmetic** | `ADD (reg)`, `SUB (reg)` | 32-bit (`W`) & 64-bit (`X`) register addition and subtraction |
+| | `SUBS (reg)`, `CMP (reg)`| Register subtraction setting 32-bit or 64-bit flags (`NZCV`) |
+| **Math (Mul & Div)** | `MUL`, `MADD`, `MSUB` | 32/64-bit Multiply, Multiply-Add (`Ra + Rn*Rm`), Multiply-Sub (`Ra - Rn*Rm`) |
+| | `SDIV`, `UDIV` | Signed and Unsigned 32/64-bit integer division |
 | **Bitwise Logic** | `AND`, `ORR`, `EOR`, `MVN` | Bitwise AND, OR, XOR, and Bitwise NOT |
-| **Bit Shifts** | `LSL`, `LSR`, `ASR` | Logical Left, Logical Right, Arithmetic (signed) Right shifts |
-| **Single Memory Access** | `LDR`, `STR` | 64-bit register Load and Store |
-| | `LDRW`, `STRW` | 32-bit word Load and Store |
-| | `LDRB`, `STRB` | 8-bit byte Load and Store (for strings and chars) |
-| | `ADR` | Form PC-relative address (for string/data pointers) |
+| **Shifts & Bitfields** | `LSL`, `LSR`, `ASR` | Logical Left, Logical Right, Arithmetic Right shifts (register & immediate) |
+| | `UBFM`, `SBFM` | Unsigned/Signed Bitfield Move (`UXTB`, `UXTH`, `SXTB`, `SXTH`, `SXTW`, `UBFX`, `SBFX`) |
+| **Single Memory Access** | `LDR`, `STR`, `LDUR`, `STUR` | 64-bit Load/Store (unsigned scaled, unscaled signed, pre/post-index, register-offset `[Xn, Rm, lsl #s]`) |
+| | `LDRW`, `STRW`, `LDRSW` | 32-bit unsigned and 64-bit sign-extending word Load/Store |
+| | `LDRH`, `STRH`, `LDRSH` | 16-bit unsigned and sign-extending halfword Load/Store |
+| | `LDRB`, `STRB`, `LDRSB` | 8-bit unsigned and sign-extending byte Load/Store |
+| | `ADR`, `ADRP` | Form PC-relative address and 4KB Page address |
+| **Conditional Select** | `CSEL` | Conditional Select (`cond ? Rn : Rm`) |
+| | `CSINC`, `CSET` | Conditional Select Increment (`cond ? Rn : Rm + 1`), Set (`cond ? 1 : 0`) |
+| | `CSINV`, `CSNEG` | Conditional Select Invert (`~Rm`), Negate (`-Rm`) |
 | **Stack & Pair Memory** | `STP`, `LDP` | Store Pair & Load Pair (for function stack frames: FP & LR) |
 | **Control Flow & Calls** | `B`, `B.cond` | Unconditional and Conditional relative branches |
+| | `CBZ`, `CBNZ` | Compare and Branch on Zero / Non-Zero (`Rt == 0` / `Rt != 0`) |
+| | `TBZ`, `TBNZ` | Test single bit (`0`–`63`) and Branch on Zero / Non-Zero |
 | | `BL` | Branch with Link (subroutine / function call; saves return address into `LR` / `X30`) |
 | | `BR`, `BLR` | Indirect Branch and Indirect Call via register pointer |
 | | `RET` | Return from subroutine to address in `LR` (`X30`) |
-| **System** | `SVC` | Supervisor Call (Linux system call trap: `sys_write`, `sys_exit`) |
+| **System & TLS** | `SVC` | Supervisor Call (Linux system call trap) |
+| | `MRS`, `MSR` | Read/Write Thread Pointer (`TPIDR_EL0`) and system registers |
 
 ---
 
@@ -105,23 +119,28 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 ├── tests/                         # Automated Test Suite
 │   ├── test_decoder.js            # 23+ unit tests for instruction decoding, shifts, and math
 │   ├── test_ui_api.js             # Unit tests for UI hooks, breakpoints, memory diffs & reset
-│   └── test_server.js             # Integration tests for HTTP dev server & binary streaming
+│   ├── test_server.js             # Integration tests for HTTP dev server & binary streaming
+│   ├── test_syscalls.js           # Unit tests for sys_brk, sys_mmap, sys_read, sys_clock_gettime
+│   └── test_abi_and_compiler.js   # Unit tests for Linux ABI stack frame, ADRP, CSEL, and CSET
 ├── tools/                         # Server, Preview Generator & ELF64 Binary Builders
 │   ├── server.js                  # Zero-dependency Node HTTP dev server (`npm run ui`)
 │   ├── generate_ui_preview.js     # Generates docs/ui_preview.svg and docs/ui_preview.png
 │   ├── elf_builder.js             # Generates standards-compliant bin/fib.elf (iterative)
 │   ├── build_fib_rec_elf.js       # Generates bin/fib_rec.elf (recursive fib(10) with stack frames)
 │   ├── build_hello_elf.js         # Generates bin/hello.elf with embedded string and load/stores
-│   └── build_math_elf.js          # Generates bin/math_func.elf with BL, STP, LDP, MUL, UDIV
+│   ├── build_math_elf.js          # Generates bin/math_func.elf with BL, STP, LDP, MUL, UDIV
+│   └── build_heap_demo_elf.js     # Generates bin/heap_demo.elf (dynamic heap allocation via sys_brk)
 ├── guest/                         # Freestanding C++ Guest Source Code
 │   ├── fib.cpp                    # Iterative Fibonacci source code
 │   ├── fib_rec.cpp                # Recursive Fibonacci source code
-│   └── hello.cpp                  # String I/O source code
+│   ├── hello.cpp                  # String I/O source code
+│   └── heap_demo.cpp              # Dynamic heap allocation source code
 ├── bin/                           # Compiled 64-bit ARM ELF Executables
 │   ├── fib.elf                    # Iterative Fibonacci(10) = 55
 │   ├── fib_rec.elf                # Recursive Fibonacci(10) = 55
 │   ├── hello.elf                  # String I/O via Linux sys_write
-│   └── math_func.elf              # Subroutine calls, stack frames & integer math
+│   ├── math_func.elf              # Subroutine calls, stack frames & integer math
+│   └── heap_demo.elf              # Dynamic heap allocation & sum verification
 ├── out/                           # Generated AOT & Binary Translator Outputs
 │   ├── fib_recompiled.js          # Lifted JavaScript module from static_recompiler.js
 │   ├── fib_translated.asm         # Translated x86-64 NASM/Intel assembly (fib.elf)
@@ -133,7 +152,9 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── ui_preview.png             # Raster PNG preview of the Web UI
 │   ├── learning.md                # Comprehensive emulator fundamentals & 5 case studies
 │   ├── plan.md                    # 6-phase architectural roadmap & verification matrix
-│   └── decoding_and_compilation.md# Deep dive on JIT vs. AOT, I/O thunking, recursion & PyTorch parallel
+│   ├── decoding_and_compilation.md# Deep dive on JIT vs. AOT, I/O thunking, recursion & PyTorch parallel
+│   ├── graphics_architecture_and_emulation.md # Deep dive on console graphics (PPU, Switch, PS5 & shader decompilation)
+│   └── static_linking_and_libc_architecture.md # Deep dive on static libc, system calls vs. library functions & Linux ABI
 ├── package.json                   # Project manifest and npm scripts
 └── README.md                      # This file
 ```

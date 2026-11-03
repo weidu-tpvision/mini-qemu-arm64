@@ -322,8 +322,14 @@ function getInstructionAnnotation(decoded, addr = 0) {
     case InstructionType.MOVZ:
     case InstructionType.MOVN:
       return `${regLabel(decoded.rd)} ← ${decoded.immValue} (0x${decoded.immValue.toString(16)})`;
+    case InstructionType.MOVK:
+      return `${regLabel(decoded.rd)}[${decoded.shift + 15}:${decoded.shift}] ← 0x${decoded.imm16.toString(16)} (keep other bits)`;
     case InstructionType.ADR:
       return `${regLabel(decoded.rd)} ← ${fmtTarget(decoded.offsetBytes)} (PC-relative address)`;
+    case InstructionType.ADRP: {
+      const pageBase = (addr & ~0xfff) + Number(decoded.offsetBytes);
+      return `${regLabel(decoded.rd)} ← 0x${pageBase.toString(16).padStart(8, "0")} (4KB Page Base)`;
+    }
     case InstructionType.ADD_IMM:
       return `${regLabel(decoded.rd, true)} ← ${regLabel(decoded.rn, true)} + ${decoded.immValue}`;
     case InstructionType.SUB_IMM:
@@ -342,6 +348,12 @@ function getInstructionAnnotation(decoded, addr = 0) {
         : `${regLabel(decoded.rd)} ← ${regLabel(decoded.rn)} - ${regLabel(decoded.rm)} (set NZCV)`;
     case InstructionType.MUL:
       return `${regLabel(decoded.rd)} ← ${regLabel(decoded.rn)} × ${regLabel(decoded.rm)} (64-bit)`;
+    case InstructionType.MADD:
+      return `${regLabel(decoded.rd)} ← ${regLabel(decoded.ra)} + (${regLabel(decoded.rn)} × ${regLabel(decoded.rm)})`;
+    case InstructionType.MSUB:
+      return decoded.ra === 31
+        ? `${regLabel(decoded.rd)} ← -(${regLabel(decoded.rn)} × ${regLabel(decoded.rm)})`
+        : `${regLabel(decoded.rd)} ← ${regLabel(decoded.ra)} - (${regLabel(decoded.rn)} × ${regLabel(decoded.rm)})`;
     case InstructionType.UDIV:
       return `${regLabel(decoded.rd)} ← ${regLabel(decoded.rn)} ÷ ${regLabel(decoded.rm)} (unsigned)`;
     case InstructionType.SDIV:
@@ -356,20 +368,51 @@ function getInstructionAnnotation(decoded, addr = 0) {
       return `${regLabel(decoded.rd)} ← ${regLabel(decoded.rn)} ^ ${regLabel(decoded.rm)} (XOR)`;
     case InstructionType.MVN_REG:
       return `${regLabel(decoded.rd)} ← ~${regLabel(decoded.rm)} (Bitwise NOT)`;
+    case InstructionType.CSEL:
+      return `${regLabel(decoded.rd)} ← (${decoded.condName.toUpperCase()}) ? ${regLabel(decoded.rn)} : ${regLabel(decoded.rm)}`;
+    case InstructionType.CSINC:
+      return (decoded.rn === 31 && decoded.rm === 31)
+        ? `${regLabel(decoded.rd)} ← (${decoded.disassembly.split(", ").pop().toUpperCase()}) ? 1 : 0`
+        : `${regLabel(decoded.rd)} ← (${decoded.condName.toUpperCase()}) ? ${regLabel(decoded.rn)} : (${regLabel(decoded.rm)} + 1)`;
+    case InstructionType.CSINV:
+      return `${regLabel(decoded.rd)} ← (${decoded.condName.toUpperCase()}) ? ${regLabel(decoded.rn)} : ~${regLabel(decoded.rm)}`;
+    case InstructionType.CSNEG:
+      return `${regLabel(decoded.rd)} ← (${decoded.condName.toUpperCase()}) ? ${regLabel(decoded.rn)} : -${regLabel(decoded.rm)}`;
+    case InstructionType.UBFM:
+      return `${regLabel(decoded.rd)} ← Unsigned Bitfield / Shift (${decoded.disassembly})`;
+    case InstructionType.SBFM:
+      return `${regLabel(decoded.rd)} ← Signed Bitfield / Sign-Extend (${decoded.disassembly})`;
     case InstructionType.STR_IMM:
     case InstructionType.STRW_IMM:
+    case InstructionType.STRH_IMM:
     case InstructionType.STRB_IMM:
-      return `Store ${regLabel(decoded.rt)} to [${regLabel(decoded.rn, true)} + ${decoded.offsetBytes}]`;
+      return decoded.isRegOffset
+        ? `Store ${regLabel(decoded.rt)} to [${regLabel(decoded.rn, true)} + ${regLabel(decoded.rm)} << ${decoded.regShift}]`
+        : `Store ${regLabel(decoded.rt)} to [${regLabel(decoded.rn, true)} + ${decoded.offsetBytes}]`;
     case InstructionType.LDR_IMM:
     case InstructionType.LDRW_IMM:
+    case InstructionType.LDRSW_IMM:
+    case InstructionType.LDRH_IMM:
+    case InstructionType.LDRSH_IMM:
     case InstructionType.LDRB_IMM:
-      return `Load ${regLabel(decoded.rt)} from [${regLabel(decoded.rn, true)} + ${decoded.offsetBytes}]`;
+    case InstructionType.LDRSB_IMM:
+      return decoded.isRegOffset
+        ? `Load ${regLabel(decoded.rt)} from [${regLabel(decoded.rn, true)} + ${regLabel(decoded.rm)} << ${decoded.regShift}]`
+        : `Load ${regLabel(decoded.rt)} from [${regLabel(decoded.rn, true)} + ${decoded.offsetBytes}]`;
     case InstructionType.STP:
       return `Push pair (${regLabel(decoded.rt1)}, ${regLabel(decoded.rt2)}) to [${regLabel(decoded.rn, true)}]`;
     case InstructionType.LDP:
       return `Pop pair (${regLabel(decoded.rt1)}, ${regLabel(decoded.rt2)}) from [${regLabel(decoded.rn, true)}]`;
     case InstructionType.B_COND:
       return `If ${decoded.condName.toUpperCase()} → jump to ${fmtTarget(decoded.offsetBytes)}`;
+    case InstructionType.CBZ:
+      return `If ${regLabel(decoded.rt)} == 0 → jump to ${fmtTarget(decoded.offsetBytes)}`;
+    case InstructionType.CBNZ:
+      return `If ${regLabel(decoded.rt)} != 0 → jump to ${fmtTarget(decoded.offsetBytes)}`;
+    case InstructionType.TBZ:
+      return `If bit ${decoded.bitPos} of ${regLabel(decoded.rt)} == 0 → jump to ${fmtTarget(decoded.offsetBytes)}`;
+    case InstructionType.TBNZ:
+      return `If bit ${decoded.bitPos} of ${regLabel(decoded.rt)} != 0 → jump to ${fmtTarget(decoded.offsetBytes)}`;
     case InstructionType.B:
       return `Unconditional jump → ${fmtTarget(decoded.offsetBytes)}`;
     case InstructionType.BL:
@@ -380,6 +423,10 @@ function getInstructionAnnotation(decoded, addr = 0) {
       return `Call function pointer in ${regLabel(decoded.rn)}`;
     case InstructionType.RET:
       return `Return from subroutine to ${regLabel(decoded.rn)} (LR)`;
+    case InstructionType.MRS:
+      return `${regLabel(decoded.rt)} ← ${decoded.sysregName.toUpperCase()} (Read Thread/System Register)`;
+    case InstructionType.MSR:
+      return `${decoded.sysregName.toUpperCase()} ← ${regLabel(decoded.rt)} (Write Thread/System Register)`;
     case InstructionType.SVC:
       return `Linux ARM64 Syscall Trap (svc #${decoded.imm16 ?? 0}, X8 = syscall#)`;
     default:

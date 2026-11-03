@@ -39,6 +39,7 @@ export class ElfLoader {
     // 5. Parse Program Headers & Load PT_LOAD Segments into Memory
     memory.segments = [];
     let loadedSegments = 0;
+    let phdrVaddr = 0x00400000n + BigInt(e_phoff);
     for (let i = 0; i < e_phnum; i++) {
       const phOffset = e_phoff + i * e_phentsize;
       const p_type = view.getUint32(phOffset + 0, true);
@@ -54,6 +55,19 @@ export class ElfLoader {
         const segmentBytes = bytes.subarray(p_offset, p_offset + p_filesz);
         memory.loadSegment(p_vaddr, segmentBytes);
 
+        // Zero-initialize .bss section if p_memsz > p_filesz
+        if (p_memsz > p_filesz) {
+          const bssStart = Number(p_vaddr) + p_filesz;
+          const bssLen = p_memsz - p_filesz;
+          for (let b = 0; b < bssLen; b++) {
+            memory.write8(bssStart + b, 0);
+          }
+        }
+
+        if (p_offset <= e_phoff && e_phoff < p_offset + p_filesz) {
+          phdrVaddr = p_vaddr + BigInt(e_phoff - p_offset);
+        }
+
         const r = (p_flags & 4) ? "R" : "-";
         const w = (p_flags & 2) ? "W" : "-";
         const x = (p_flags & 1) ? "X" : "-";
@@ -67,7 +81,7 @@ export class ElfLoader {
           data: segmentBytes
         });
 
-        console.log(`  Loaded Segment [${i}]: vaddr=0x${p_vaddr.toString(16)} size=${p_filesz}B flags=[${r}${w}${x}]`);
+        console.log(`  Loaded Segment [${i}]: vaddr=0x${p_vaddr.toString(16)} size=${p_filesz}B${p_memsz > p_filesz ? ` (memsz=${p_memsz}B)` : ""} flags=[${r}${w}${x}]`);
         loadedSegments++;
       }
     }
@@ -75,6 +89,15 @@ export class ElfLoader {
     if (loadedSegments === 0) {
       throw new Error(`No loadable (PT_LOAD) segments found in ELF binary.`);
     }
+
+    memory.elfHeader = {
+      entry: e_entry,
+      phoff: e_phoff,
+      phentsize: e_phentsize,
+      phnum: e_phnum,
+      phdrVaddr
+    };
+    memory.lastWritten.clear();
 
     return e_entry;
   }

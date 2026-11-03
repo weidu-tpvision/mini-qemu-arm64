@@ -15,6 +15,104 @@ export class MiniQEMU {
     this.onHalt = null;
     this.loadedSource = null;
     this.entryPoint = 0n;
+    this.heapStart = 0x00500000n;
+    this.brk = 0x00500000n;
+    this.mmapCurrent = 0x10000000n;
+    this.onRead = null;
+    this.stdinQueue = [];
+
+    // Virtual File System (VFS) & Linux File Descriptor Table (fd >= 3)
+    this.vfs = new Map();
+    this.fds = new Map();
+    this.nextFd = 3;
+    this.cwd = "/workspace";
+  }
+
+  normalizeVfsPath(rawPath) {
+    if (!rawPath) return "";
+    let p = String(rawPath).replace(/\\/g, "/").trim();
+    if (p.startsWith("/workspace/")) p = p.slice("/workspace/".length);
+    if (p.startsWith("./")) p = p.slice(2);
+    if (p.startsWith("/")) p = p.slice(1);
+    return p;
+  }
+
+  mountFile(path, content) {
+    const key = this.normalizeVfsPath(path);
+    const bytes = typeof content === "string"
+      ? new TextEncoder().encode(content)
+      : new Uint8Array(content);
+    this.vfs.set(key, new Uint8Array(bytes));
+  }
+
+  readVfsFile(path, asString = false) {
+    const key = this.normalizeVfsPath(path);
+    const data = this.vfs.get(key);
+    if (!data) return null;
+    return asString ? new TextDecoder().decode(data) : new Uint8Array(data);
+  }
+
+  readGuestCString(addr, maxLen = 1024) {
+    const bytes = [];
+    for (let i = 0; i < maxLen; i++) {
+      const b = this.memory.read8(addr + i);
+      if (b === 0) break;
+      bytes.push(b);
+    }
+    return new TextDecoder().decode(new Uint8Array(bytes));
+  }
+
+  writeBytesToFd(fd, bytes) {
+    if (fd === 1 || fd === 2) {
+      const text = new TextDecoder().decode(bytes);
+      if (this.onWrite) {
+        this.onWrite(text, fd);
+      }
+      if (typeof process !== "undefined" && process.stdout && !this.suppressStdout) {
+        process.stdout.write(text);
+      }
+      return bytes.length;
+    }
+    const desc = this.fds.get(fd);
+    if (!desc || !desc.writable) return -9; // -EBADF
+    if (desc.append) {
+      desc.pos = desc.data.length;
+    }
+    const endPos = desc.pos + bytes.length;
+    if (endPos > desc.data.length) {
+      const grown = new Uint8Array(endPos);
+      grown.set(desc.data);
+      desc.data = grown;
+    }
+    desc.data.set(bytes, desc.pos);
+    desc.pos = endPos;
+    this.vfs.set(desc.path, new Uint8Array(desc.data));
+    return bytes.length;
+  }
+
+  writeGuestStatStruct(statBufAddr, sizeBytes, isCharDev = false) {
+    // Zero 128-byte AArch64 struct stat
+    for (let i = 0; i < 128; i += 8) {
+      this.memory.write64(statBufAddr + i, 0n);
+    }
+    // st_mode at offset 16 (32-bit): S_IFCHR (0020000 | 0666 = 0x21b6) or S_IFREG (0100000 | 0644 = 0x81a4)
+    const mode = isCharDev ? 0x21b6 : 0x81a4;
+    this.memory.write32(statBufAddr + 16, mode);
+    // st_nlink at offset 20 (32-bit)
+    this.memory.write32(statBufAddr + 20, 1);
+    // st_size at offset 48 (64-bit)
+    this.memory.write64(statBufAddr + 48, BigInt(sizeBytes));
+    // st_blksize at offset 56 (32-bit)
+    this.memory.write32(statBufAddr + 56, 4096);
+  }
+
+  feedStdin(data) {
+    if (typeof data === "string") {
+      const bytes = new TextEncoder().encode(data);
+      for (const b of bytes) this.stdinQueue.push(b);
+    } else if (data instanceof Uint8Array || (typeof Buffer !== "undefined" && Buffer.isBuffer(data))) {
+      for (const b of data) this.stdinQueue.push(b);
+    }
   }
 
   addBreakpoint(addr) {
@@ -48,11 +146,82 @@ export class MiniQEMU {
     this.memory.clear();
     this.cpu.reset();
     this.cycleCount = 0;
-    this.loadedSource = { source: filePathOrBuffer, name };
+    const progName = typeof filePathOrBuffer === "string" ? filePathOrBuffer.split(/[/\\]/).pop() : name;
+    this.loadedSource = { source: filePathOrBuffer, name: progName };
     const entryPoint = ElfLoader.load(filePathOrBuffer, this.memory);
     this.entryPoint = entryPoint;
     this.cpu.pc = entryPoint;
+
+    // Calculate initial program break (brk) just past highest loaded segment, page-aligned
+    let maxAddr = 0x00400000n;
+    if (this.memory.segments && this.memory.segments.length > 0) {
+      for (const seg of this.memory.segments) {
+        const segEnd = BigInt(seg.vaddr + Math.max(seg.filesz, seg.memsz));
+        if (segEnd > maxAddr) maxAddr = segEnd;
+      }
+    }
+    this.heapStart = (maxAddr + 4095n) & ~4095n;
+    this.brk = this.heapStart;
+    this.mmapCurrent = 0x10000000n;
+    this.stdinQueue = [];
+    this.fds.clear();
+    this.nextFd = 3;
+
+    // Setup standard Linux initial stack frame (argc, argv, envp, auxv)
+    this.setupLinuxStack(entryPoint, progName);
+
     return entryPoint;
+  }
+
+  // Linux AArch64 Initial Process Stack Frame ABI:
+  // [SP + 0]: argc = 1
+  // [SP + 8]: argv[0] pointer -> programName
+  // [SP + 16]: argv[1] = NULL
+  // [SP + 24]: envp[0] = NULL
+  // [SP + 32]: auxv AT_PAGESZ (6) = 4096
+  // [SP + 48]: auxv AT_ENTRY (9) = entryPoint
+  // [SP + 64]: auxv AT_PHDR (3), AT_PHENT (4), AT_PHNUM (5), AT_RANDOM (25), AT_NULL (0)
+  setupLinuxStack(entryPoint, programName = "program") {
+    const stackTop = 0x00700000;
+    const progNameBytes = new TextEncoder().encode(programName + "\0");
+    const stringAddr = stackTop - 64;
+    for (let i = 0; i < progNameBytes.length; i++) {
+      this.memory.write8(stringAddr + i, progNameBytes[i]);
+    }
+
+    // Write 16 bytes of deterministic entropy for AT_RANDOM (stack canary seed)
+    const randomAddr = stackTop - 80;
+    for (let i = 0; i < 16; i++) {
+      this.memory.write8(randomAddr + i, (0xa5 ^ (i * 17)) & 0xff);
+    }
+
+    const elfHdr = this.memory.elfHeader || {};
+    const phdrVaddr = elfHdr.phdrVaddr ?? 0x00400040n;
+    const phentsize = BigInt(elfHdr.phentsize ?? 56);
+    const phnum = BigInt(elfHdr.phnum ?? 1);
+
+    // 18 * 8 = 144 bytes (16-byte aligned below randomAddr)
+    const spAddr = (randomAddr - 144) & ~0xf;
+    const words = [
+      1n,                     // argc = 1
+      BigInt(stringAddr),     // argv[0]
+      0n,                     // argv[1] = NULL
+      0n,                     // envp[0] = NULL
+      6n, 4096n,              // auxv: AT_PAGESZ = 4096
+      9n, BigInt(entryPoint), // auxv: AT_ENTRY = entryPoint
+      3n, BigInt(phdrVaddr),  // auxv: AT_PHDR
+      4n, phentsize,          // auxv: AT_PHENT
+      5n, phnum,              // auxv: AT_PHNUM
+      25n, BigInt(randomAddr),// auxv: AT_RANDOM (16-byte seed)
+      0n, 0n                  // auxv: AT_NULL = 0
+    ];
+
+    for (let i = 0; i < words.length; i++) {
+      this.memory.write64(spAddr + i * 8, words[i]);
+    }
+
+    this.cpu.sp = BigInt(spAddr);
+    this.memory.lastWritten.clear();
   }
 
   reset() {
@@ -69,16 +238,43 @@ export class MiniQEMU {
   loadProgram(instructions, loadAddress = 0x00400000) {
     this.memory.loadProgram(loadAddress, instructions);
     this.cpu.pc = BigInt(loadAddress);
+    this.memory.lastWritten.clear();
   }
 
   // Apply ARM64 barrel shifter (00=LSL, 01=LSR, 10=ASR)
-  applyShift(value, shiftType = 0, amount = 0) {
-    if (!amount) return value;
-    const amt = BigInt(amount & 0x3f);
-    if (shiftType === 0b00) return BigInt.asUintN(64, value << amt); // LSL
-    if (shiftType === 0b01) return BigInt.asUintN(64, value >> amt); // LSR
-    if (shiftType === 0b10) return BigInt.asUintN(64, BigInt.asIntN(64, value) >> amt); // ASR
-    return value;
+  applyShift(value, shiftType = 0, amount = 0, sf = 1) {
+    const bits = sf === 0 ? 32 : 64;
+    const maskedVal = BigInt.asUintN(bits, value);
+    if (!amount) return maskedVal;
+    const amt = BigInt(amount & (sf === 0 ? 0x1f : 0x3f));
+    if (shiftType === 0b00) return BigInt.asUintN(bits, maskedVal << amt); // LSL
+    if (shiftType === 0b01) return BigInt.asUintN(bits, maskedVal >> amt); // LSR
+    if (shiftType === 0b10) return BigInt.asUintN(bits, BigInt.asIntN(bits, maskedVal) >> amt); // ASR
+    return maskedVal;
+  }
+
+  // Compute effective memory address for single-register loads/stores (Immediate, Unscaled, Pre/Post-Index, or Register-Offset)
+  computeLoadStoreAddr(decoded) {
+    const baseAddr = Number(this.cpu.getSPOrReg(decoded.rn));
+    if (decoded.isRegOffset) {
+      const rmVal = this.cpu.getReg(decoded.rm);
+      let indexVal;
+      if (decoded.option === 0b010) {
+        indexVal = BigInt.asUintN(32, rmVal); // UXTW
+      } else if (decoded.option === 0b110) {
+        indexVal = BigInt.asIntN(32, rmVal);  // SXTW
+      } else if (decoded.option === 0b111) {
+        indexVal = BigInt.asIntN(64, rmVal);  // SXTX
+      } else {
+        indexVal = BigInt.asIntN(64, rmVal);  // LSL / UXTX
+      }
+      if (decoded.regShift > 0) {
+        indexVal = indexVal << BigInt(decoded.regShift);
+      }
+      return { baseAddr, targetAddr: baseAddr + Number(indexVal) };
+    }
+    const targetAddr = decoded.postIndex ? baseAddr : (baseAddr + decoded.offsetBytes);
+    return { baseAddr, targetAddr };
   }
 
   evalCondition(cond) {
@@ -138,40 +334,63 @@ export class MiniQEMU {
         break;
       }
 
+      case InstructionType.ADRP: {
+        const basePage = BigInt(currentPC) & ~0xfffn;
+        const targetPage = BigInt.asUintN(64, basePage + BigInt(decoded.imm21) * 4096n);
+        this.cpu.setReg(decoded.rd, targetPage);
+        this.cpu.pc += 4n;
+        break;
+      }
+
       case InstructionType.MOVZ:
       case InstructionType.MOVN: {
-        this.cpu.setReg(decoded.rd, decoded.immValue);
+        const bits = decoded.sf === 0 ? 32 : 64;
+        this.cpu.setReg(decoded.rd, BigInt.asUintN(bits, decoded.immValue));
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.MOVK: {
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const clearMask = ~(0xffffn << BigInt(decoded.shift));
+        const kept = this.cpu.getReg(decoded.rd) & clearMask;
+        const val = BigInt.asUintN(bits, kept | decoded.immValue);
+        this.cpu.setReg(decoded.rd, val);
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.ADD_IMM: {
-        const sum = this.cpu.getSPOrReg(decoded.rn) + decoded.immValue;
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const sum = BigInt.asUintN(bits, BigInt.asUintN(bits, this.cpu.getSPOrReg(decoded.rn)) + decoded.immValue);
         this.cpu.setSPOrReg(decoded.rd, sum);
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.SUB_IMM: {
-        const diff = this.cpu.getSPOrReg(decoded.rn) - decoded.immValue;
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const diff = BigInt.asUintN(bits, BigInt.asUintN(bits, this.cpu.getSPOrReg(decoded.rn)) - decoded.immValue);
         this.cpu.setSPOrReg(decoded.rd, diff);
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.SUBS_IMM: {
-        const op1 = this.cpu.getSPOrReg(decoded.rn);
-        const op2 = decoded.immValue;
-        const result = BigInt.asUintN(64, op1 - op2);
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const signBit = BigInt(bits - 1);
+        const op1 = BigInt.asUintN(bits, this.cpu.getSPOrReg(decoded.rn));
+        const op2 = BigInt.asUintN(bits, decoded.immValue);
+        const result = BigInt.asUintN(bits, op1 - op2);
 
         this.cpu.setReg(decoded.rd, result);
 
         this.cpu.flags.Z = (result === 0n);
-        this.cpu.flags.N = ((result & (1n << 63n)) !== 0n);
+        this.cpu.flags.N = ((result & (1n << signBit)) !== 0n);
         this.cpu.flags.C = (op1 >= op2);
-        const s_op1 = BigInt.asIntN(64, op1);
-        const s_op2 = BigInt.asIntN(64, op2);
-        const s_res = BigInt.asIntN(64, result);
+        const s_op1 = BigInt.asIntN(bits, op1);
+        const s_op2 = BigInt.asIntN(bits, op2);
+        const s_res = BigInt.asIntN(bits, result);
         this.cpu.flags.V = ((s_op1 ^ s_op2) < 0n) && ((s_op1 ^ s_res) < 0n);
 
         this.cpu.pc += 4n;
@@ -180,34 +399,40 @@ export class MiniQEMU {
 
       // --- Register Arithmetic & Logic ---
       case InstructionType.ADD_REG: {
-        const op2 = this.applyShift(this.cpu.getReg(decoded.rm), decoded.shift, decoded.imm6);
-        const sum = this.cpu.getReg(decoded.rn) + op2;
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const op1 = BigInt.asUintN(bits, this.cpu.getReg(decoded.rn));
+        const op2 = this.applyShift(this.cpu.getReg(decoded.rm), decoded.shift, decoded.imm6, decoded.sf);
+        const sum = BigInt.asUintN(bits, op1 + op2);
         this.cpu.setReg(decoded.rd, sum);
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.SUB_REG: {
-        const op2 = this.applyShift(this.cpu.getReg(decoded.rm), decoded.shift, decoded.imm6);
-        const diff = this.cpu.getReg(decoded.rn) - op2;
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const op1 = BigInt.asUintN(bits, this.cpu.getReg(decoded.rn));
+        const op2 = this.applyShift(this.cpu.getReg(decoded.rm), decoded.shift, decoded.imm6, decoded.sf);
+        const diff = BigInt.asUintN(bits, op1 - op2);
         this.cpu.setReg(decoded.rd, diff);
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.SUBS_REG: {
-        const op1 = this.cpu.getReg(decoded.rn);
-        const op2 = this.applyShift(this.cpu.getReg(decoded.rm), decoded.shift, decoded.imm6);
-        const result = BigInt.asUintN(64, op1 - op2);
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const signBit = BigInt(bits - 1);
+        const op1 = BigInt.asUintN(bits, this.cpu.getReg(decoded.rn));
+        const op2 = this.applyShift(this.cpu.getReg(decoded.rm), decoded.shift, decoded.imm6, decoded.sf);
+        const result = BigInt.asUintN(bits, op1 - op2);
 
         this.cpu.setReg(decoded.rd, result);
 
         this.cpu.flags.Z = (result === 0n);
-        this.cpu.flags.N = ((result & (1n << 63n)) !== 0n);
+        this.cpu.flags.N = ((result & (1n << signBit)) !== 0n);
         this.cpu.flags.C = (op1 >= op2);
-        const s_op1 = BigInt.asIntN(64, op1);
-        const s_op2 = BigInt.asIntN(64, op2);
-        const s_res = BigInt.asIntN(64, result);
+        const s_op1 = BigInt.asIntN(bits, op1);
+        const s_op2 = BigInt.asIntN(bits, op2);
+        const s_res = BigInt.asIntN(bits, result);
         this.cpu.flags.V = ((s_op1 ^ s_op2) < 0n) && ((s_op1 ^ s_res) < 0n);
 
         this.cpu.pc += 4n;
@@ -215,53 +440,108 @@ export class MiniQEMU {
       }
 
       case InstructionType.AND_REG: {
-        const res = this.cpu.getReg(decoded.rn) & this.cpu.getReg(decoded.rm);
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const res = BigInt.asUintN(bits, this.cpu.getReg(decoded.rn) & this.cpu.getReg(decoded.rm));
         this.cpu.setReg(decoded.rd, res);
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.ORR_REG: {
-        const res = this.cpu.getReg(decoded.rn) | this.cpu.getReg(decoded.rm);
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const res = BigInt.asUintN(bits, this.cpu.getReg(decoded.rn) | this.cpu.getReg(decoded.rm));
         this.cpu.setReg(decoded.rd, res);
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.EOR_REG: {
-        const res = this.cpu.getReg(decoded.rn) ^ this.cpu.getReg(decoded.rm);
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const res = BigInt.asUintN(bits, this.cpu.getReg(decoded.rn) ^ this.cpu.getReg(decoded.rm));
         this.cpu.setReg(decoded.rd, res);
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.MVN_REG: {
-        const res = BigInt.asUintN(64, ~this.cpu.getReg(decoded.rm));
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const res = BigInt.asUintN(bits, ~this.cpu.getReg(decoded.rm));
         this.cpu.setReg(decoded.rd, res);
         this.cpu.pc += 4n;
         break;
       }
 
-      // --- Math: Multiply & Divide ---
+      // --- Conditional Select (CSEL / CSINC / CSINV / CSNEG / CSET) ---
+      case InstructionType.CSEL:
+      case InstructionType.CSINC:
+      case InstructionType.CSINV:
+      case InstructionType.CSNEG: {
+        const condMet = this.evalCondition(decoded.cond);
+        let val;
+        if (condMet) {
+          val = this.cpu.getReg(decoded.rn);
+        } else {
+          const rmVal = this.cpu.getReg(decoded.rm);
+          if (decoded.type === InstructionType.CSEL) {
+            val = rmVal;
+          } else if (decoded.type === InstructionType.CSINC) {
+            val = BigInt.asUintN(64, rmVal + 1n);
+          } else if (decoded.type === InstructionType.CSINV) {
+            val = BigInt.asUintN(64, ~rmVal);
+          } else if (decoded.type === InstructionType.CSNEG) {
+            val = BigInt.asUintN(64, -rmVal);
+          }
+        }
+        if (!decoded.sf) {
+          val = BigInt.asUintN(32, val);
+        }
+        this.cpu.setReg(decoded.rd, val);
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      // --- Math: Multiply, Multiply-Add/Sub & Divide ---
       case InstructionType.MUL: {
-        const res = BigInt.asUintN(64, this.cpu.getReg(decoded.rn) * this.cpu.getReg(decoded.rm));
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const res = BigInt.asUintN(bits, this.cpu.getReg(decoded.rn) * this.cpu.getReg(decoded.rm));
+        this.cpu.setReg(decoded.rd, res);
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.MADD: {
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const prod = this.cpu.getReg(decoded.rn) * this.cpu.getReg(decoded.rm);
+        const res = BigInt.asUintN(bits, this.cpu.getReg(decoded.ra) + prod);
+        this.cpu.setReg(decoded.rd, res);
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.MSUB: {
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const prod = this.cpu.getReg(decoded.rn) * this.cpu.getReg(decoded.rm);
+        const res = BigInt.asUintN(bits, this.cpu.getReg(decoded.ra) - prod);
         this.cpu.setReg(decoded.rd, res);
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.UDIV: {
-        const divisor = this.cpu.getReg(decoded.rm);
-        const res = (divisor === 0n) ? 0n : (this.cpu.getReg(decoded.rn) / divisor);
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const op1 = BigInt.asUintN(bits, this.cpu.getReg(decoded.rn));
+        const divisor = BigInt.asUintN(bits, this.cpu.getReg(decoded.rm));
+        const res = (divisor === 0n) ? 0n : BigInt.asUintN(bits, op1 / divisor);
         this.cpu.setReg(decoded.rd, res);
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.SDIV: {
-        const s_op1 = BigInt.asIntN(64, this.cpu.getReg(decoded.rn));
-        const s_op2 = BigInt.asIntN(64, this.cpu.getReg(decoded.rm));
-        const res = (s_op2 === 0n) ? 0n : BigInt.asUintN(64, s_op1 / s_op2);
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const s_op1 = BigInt.asIntN(bits, this.cpu.getReg(decoded.rn));
+        const s_op2 = BigInt.asIntN(bits, this.cpu.getReg(decoded.rm));
+        const res = (s_op2 === 0n) ? 0n : BigInt.asUintN(bits, s_op1 / s_op2);
         this.cpu.setReg(decoded.rd, res);
         this.cpu.pc += 4n;
         break;
@@ -269,25 +549,59 @@ export class MiniQEMU {
 
       // --- Bit Shifts ---
       case InstructionType.LSL: {
-        const shift = Number(this.cpu.getReg(decoded.rm) & 0x3fn);
-        const res = BigInt.asUintN(64, this.cpu.getReg(decoded.rn) << BigInt(shift));
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const mask = decoded.sf === 0 ? 0x1fn : 0x3fn;
+        const shift = Number(this.cpu.getReg(decoded.rm) & mask);
+        const res = BigInt.asUintN(bits, BigInt.asUintN(bits, this.cpu.getReg(decoded.rn)) << BigInt(shift));
         this.cpu.setReg(decoded.rd, res);
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.LSR: {
-        const shift = Number(this.cpu.getReg(decoded.rm) & 0x3fn);
-        const res = BigInt.asUintN(64, this.cpu.getReg(decoded.rn) >> BigInt(shift));
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const mask = decoded.sf === 0 ? 0x1fn : 0x3fn;
+        const shift = Number(this.cpu.getReg(decoded.rm) & mask);
+        const res = BigInt.asUintN(bits, BigInt.asUintN(bits, this.cpu.getReg(decoded.rn)) >> BigInt(shift));
         this.cpu.setReg(decoded.rd, res);
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.ASR: {
-        const shift = Number(this.cpu.getReg(decoded.rm) & 0x3fn);
-        const s_val = BigInt.asIntN(64, this.cpu.getReg(decoded.rn));
-        const res = BigInt.asUintN(64, s_val >> BigInt(shift));
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const mask = decoded.sf === 0 ? 0x1fn : 0x3fn;
+        const shift = Number(this.cpu.getReg(decoded.rm) & mask);
+        const s_val = BigInt.asIntN(bits, this.cpu.getReg(decoded.rn));
+        const res = BigInt.asUintN(bits, s_val >> BigInt(shift));
+        this.cpu.setReg(decoded.rd, res);
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.UBFM:
+      case InstructionType.SBFM: {
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const isSigned = decoded.type === InstructionType.SBFM;
+        const src = BigInt.asUintN(bits, this.cpu.getReg(decoded.rn));
+        const { immr, imms } = decoded;
+        let res;
+        if (imms >= immr) {
+          const width = imms - immr + 1;
+          const mask = (1n << BigInt(width)) - 1n;
+          const field = (src >> BigInt(immr)) & mask;
+          res = isSigned
+            ? BigInt.asUintN(bits, BigInt.asIntN(width, field))
+            : BigInt.asUintN(bits, field);
+        } else {
+          const width = imms + 1;
+          const shift = bits - immr;
+          const mask = (1n << BigInt(width)) - 1n;
+          const field = src & mask;
+          res = isSigned
+            ? BigInt.asUintN(bits, BigInt.asIntN(width, field) << BigInt(shift))
+            : BigInt.asUintN(bits, field << BigInt(shift));
+        }
         this.cpu.setReg(decoded.rd, res);
         this.cpu.pc += 4n;
         break;
@@ -295,49 +609,119 @@ export class MiniQEMU {
 
       // --- Single Load/Store ---
       case InstructionType.STR_IMM: {
-        const baseAddr = Number(this.cpu.getSPOrReg(decoded.rn));
-        const targetAddr = baseAddr + decoded.offsetBytes;
+        const { baseAddr, targetAddr } = this.computeLoadStoreAddr(decoded);
         this.memory.write64(targetAddr, this.cpu.getReg(decoded.rt));
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.LDR_IMM: {
-        const baseAddr = Number(this.cpu.getSPOrReg(decoded.rn));
-        const targetAddr = baseAddr + decoded.offsetBytes;
+        const { baseAddr, targetAddr } = this.computeLoadStoreAddr(decoded);
         this.cpu.setReg(decoded.rt, this.memory.read64(targetAddr));
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.STRW_IMM: {
-        const baseAddr = Number(this.cpu.getSPOrReg(decoded.rn));
-        const targetAddr = baseAddr + decoded.offsetBytes;
+        const { baseAddr, targetAddr } = this.computeLoadStoreAddr(decoded);
         this.memory.write32(targetAddr, Number(this.cpu.getReg(decoded.rt) & 0xffffffffn));
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.LDRW_IMM: {
-        const baseAddr = Number(this.cpu.getSPOrReg(decoded.rn));
-        const targetAddr = baseAddr + decoded.offsetBytes;
+        const { baseAddr, targetAddr } = this.computeLoadStoreAddr(decoded);
         this.cpu.setReg(decoded.rt, BigInt(this.memory.read32(targetAddr)));
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.LDRSW_IMM: {
+        const { baseAddr, targetAddr } = this.computeLoadStoreAddr(decoded);
+        const raw32 = BigInt(this.memory.read32(targetAddr));
+        const signExt64 = BigInt.asUintN(64, BigInt.asIntN(32, raw32));
+        this.cpu.setReg(decoded.rt, signExt64);
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.STRH_IMM: {
+        const { baseAddr, targetAddr } = this.computeLoadStoreAddr(decoded);
+        this.memory.write16(targetAddr, Number(this.cpu.getReg(decoded.rt) & 0xffffn));
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.LDRH_IMM: {
+        const { baseAddr, targetAddr } = this.computeLoadStoreAddr(decoded);
+        this.cpu.setReg(decoded.rt, BigInt(this.memory.read16(targetAddr)));
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.LDRSH_IMM: {
+        const { baseAddr, targetAddr } = this.computeLoadStoreAddr(decoded);
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const raw16 = BigInt(this.memory.read16(targetAddr));
+        const signExt = BigInt.asUintN(bits, BigInt.asIntN(16, raw16));
+        this.cpu.setReg(decoded.rt, signExt);
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.STRB_IMM: {
-        const baseAddr = Number(this.cpu.getSPOrReg(decoded.rn));
-        const targetAddr = baseAddr + decoded.offsetBytes;
+        const { baseAddr, targetAddr } = this.computeLoadStoreAddr(decoded);
         this.memory.write8(targetAddr, Number(this.cpu.getReg(decoded.rt) & 0xffn));
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
         this.cpu.pc += 4n;
         break;
       }
 
       case InstructionType.LDRB_IMM: {
-        const baseAddr = Number(this.cpu.getSPOrReg(decoded.rn));
-        const targetAddr = baseAddr + decoded.offsetBytes;
+        const { baseAddr, targetAddr } = this.computeLoadStoreAddr(decoded);
         this.cpu.setReg(decoded.rt, BigInt(this.memory.read8(targetAddr)));
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.LDRSB_IMM: {
+        const { baseAddr, targetAddr } = this.computeLoadStoreAddr(decoded);
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const raw8 = BigInt(this.memory.read8(targetAddr));
+        const signExt = BigInt.asUintN(bits, BigInt.asIntN(8, raw8));
+        this.cpu.setReg(decoded.rt, signExt);
+        if (decoded.preIndex || decoded.postIndex) {
+          this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
+        }
         this.cpu.pc += 4n;
         break;
       }
@@ -377,6 +761,31 @@ export class MiniQEMU {
         break;
       }
 
+      case InstructionType.CBZ:
+      case InstructionType.CBNZ: {
+        const bits = decoded.sf === 0 ? 32 : 64;
+        const val = BigInt.asUintN(bits, this.cpu.getReg(decoded.rt));
+        const shouldBranch = decoded.type === InstructionType.CBZ ? (val === 0n) : (val !== 0n);
+        if (shouldBranch) {
+          this.cpu.pc = BigInt(currentPC + decoded.offsetBytes);
+        } else {
+          this.cpu.pc += 4n;
+        }
+        break;
+      }
+
+      case InstructionType.TBZ:
+      case InstructionType.TBNZ: {
+        const bitVal = (this.cpu.getReg(decoded.rt) >> BigInt(decoded.bitPos)) & 1n;
+        const shouldBranch = decoded.type === InstructionType.TBZ ? (bitVal === 0n) : (bitVal !== 0n);
+        if (shouldBranch) {
+          this.cpu.pc = BigInt(currentPC + decoded.offsetBytes);
+        } else {
+          this.cpu.pc += 4n;
+        }
+        break;
+      }
+
       case InstructionType.B: {
         this.cpu.pc = BigInt(currentPC + decoded.offsetBytes);
         break;
@@ -405,17 +814,126 @@ export class MiniQEMU {
         break;
       }
 
+      // --- System Register Access (TPIDR_EL0 Thread Pointer / TLS) ---
+      case InstructionType.MSR: {
+        const val = this.cpu.getReg(decoded.rt);
+        if (decoded.sysreg === 0xde82) {
+          this.cpu.tpidr_el0 = val;
+        } else {
+          this.cpu.sysRegs.set(decoded.sysreg, val);
+        }
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.MRS: {
+        const val = decoded.sysreg === 0xde82
+          ? this.cpu.tpidr_el0
+          : (this.cpu.sysRegs.get(decoded.sysreg) ?? 0n);
+        this.cpu.setReg(decoded.rt, val);
+        this.cpu.pc += 4n;
+        break;
+      }
+
       // --- Syscalls ---
       case InstructionType.SVC: {
         const syscallNum = Number(this.cpu.getReg(8));
 
-        if (syscallNum === 93) { // sys_exit
+        if (syscallNum === 93 || syscallNum === 94) { // sys_exit (93) / sys_exit_group (94)
           this.cpu.exitCode = Number(this.cpu.getReg(0));
           this.cpu.halted = true;
           if (this.onHalt) {
             this.onHalt(this.cpu.exitCode);
           }
-        } else if (syscallNum === 64) { // sys_write
+        } else if (syscallNum === 17) { // sys_getcwd(buf, size)
+          const bufAddr = Number(this.cpu.getReg(0));
+          const size = Number(this.cpu.getReg(1));
+          const cwdBytes = new TextEncoder().encode(this.cwd + "\0");
+          if (size < cwdBytes.length) {
+            this.cpu.setReg(0, BigInt.asUintN(64, -34n)); // -ERANGE
+          } else {
+            for (let i = 0; i < cwdBytes.length; i++) {
+              this.memory.write8(bufAddr + i, cwdBytes[i]);
+            }
+            this.cpu.setReg(0, BigInt(bufAddr));
+          }
+        } else if (syscallNum === 35) { // sys_unlinkat(dirfd, pathname, flags)
+          const pathAddr = Number(this.cpu.getReg(1));
+          const key = this.normalizeVfsPath(this.readGuestCString(pathAddr));
+          if (this.vfs.has(key)) {
+            this.vfs.delete(key);
+            this.cpu.setReg(0, 0n);
+          } else {
+            this.cpu.setReg(0, BigInt.asUintN(64, -2n)); // -ENOENT
+          }
+        } else if (syscallNum === 56) { // sys_openat(dirfd, pathname, flags, mode)
+          const pathAddr = Number(this.cpu.getReg(1));
+          const flags = Number(this.cpu.getReg(2));
+          const key = this.normalizeVfsPath(this.readGuestCString(pathAddr));
+
+          // Linux AArch64 open flags: O_ACCMODE=3 (0=RDONLY, 1=WRONLY, 2=RDWR), O_CREAT=0x40, O_TRUNC=0x200, O_APPEND=0x400
+          const accMode = flags & 0x3;
+          const isCreat = (flags & 0x40) !== 0;
+          const isTrunc = (flags & 0x200) !== 0;
+          const isAppend = (flags & 0x400) !== 0;
+          const writable = (accMode === 1 || accMode === 2);
+
+          let existing = this.vfs.get(key);
+          if (!existing && !isCreat) {
+            this.cpu.setReg(0, BigInt.asUintN(64, -2n)); // -ENOENT
+          } else {
+            const data = (!existing || isTrunc) ? new Uint8Array(0) : new Uint8Array(existing);
+            this.vfs.set(key, new Uint8Array(data));
+            const fd = this.nextFd++;
+            this.fds.set(fd, {
+              path: key,
+              data,
+              pos: isAppend ? data.length : 0,
+              flags,
+              writable,
+              append: isAppend,
+            });
+            this.cpu.setReg(0, BigInt(fd));
+          }
+        } else if (syscallNum === 57) { // sys_close(fd)
+          const fd = Number(this.cpu.getReg(0));
+          if (fd >= 0 && fd <= 2) {
+            this.cpu.setReg(0, 0n);
+          } else if (this.fds.has(fd)) {
+            const desc = this.fds.get(fd);
+            if (desc.writable) {
+              this.vfs.set(desc.path, new Uint8Array(desc.data));
+            }
+            this.fds.delete(fd);
+            this.cpu.setReg(0, 0n);
+          } else {
+            this.cpu.setReg(0, BigInt.asUintN(64, -9n)); // -EBADF
+          }
+        } else if (syscallNum === 62) { // sys_lseek(fd, offset, whence)
+          const fd = Number(this.cpu.getReg(0));
+          const offset = Number(BigInt.asIntN(64, this.cpu.getReg(1)));
+          const whence = Number(this.cpu.getReg(2)); // 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END
+          const desc = this.fds.get(fd);
+          if (!desc) {
+            this.cpu.setReg(0, BigInt.asUintN(64, -9n)); // -EBADF
+          } else {
+            let newPos = desc.pos;
+            if (whence === 0) newPos = offset;
+            else if (whence === 1) newPos = desc.pos + offset;
+            else if (whence === 2) newPos = desc.data.length + offset;
+            else {
+              this.cpu.setReg(0, BigInt.asUintN(64, -22n)); // -EINVAL
+              this.cpu.pc += 4n;
+              break;
+            }
+            if (newPos < 0) {
+              this.cpu.setReg(0, BigInt.asUintN(64, -22n)); // -EINVAL
+            } else {
+              desc.pos = newPos;
+              this.cpu.setReg(0, BigInt(newPos));
+            }
+          }
+        } else if (syscallNum === 64) { // sys_write(fd, buf, count)
           const fd = Number(this.cpu.getReg(0));
           const bufAddr = Number(this.cpu.getReg(1));
           const count = Number(this.cpu.getReg(2));
@@ -424,16 +942,149 @@ export class MiniQEMU {
           for (let i = 0; i < count; i++) {
             bytes[i] = this.memory.read8(bufAddr + i);
           }
-          const text = new TextDecoder().decode(bytes);
+          const written = this.writeBytesToFd(fd, bytes);
+          this.cpu.setReg(0, BigInt.asUintN(64, BigInt(written)));
+        } else if (syscallNum === 66) { // sys_writev(fd, iov, iovcnt) - scatter/gather I/O used by musl/glibc printf
+          const fd = Number(this.cpu.getReg(0));
+          const iovAddr = Number(this.cpu.getReg(1));
+          const iovcnt = Number(this.cpu.getReg(2));
 
-          if (this.onWrite) {
-            this.onWrite(text, fd);
+          let totalWritten = 0;
+          for (let v = 0; v < iovcnt; v++) {
+            const entryAddr = iovAddr + v * 16;
+            const basePtr = Number(this.memory.read64(entryAddr));
+            const len = Number(this.memory.read64(entryAddr + 8));
+            if (len > 0) {
+              const bytes = new Uint8Array(len);
+              for (let i = 0; i < len; i++) {
+                bytes[i] = this.memory.read8(basePtr + i);
+              }
+              const res = this.writeBytesToFd(fd, bytes);
+              if (res < 0) {
+                totalWritten = res;
+                break;
+              }
+              totalWritten += res;
+            }
           }
-          if ((fd === 1 || fd === 2) && typeof process !== "undefined" && process.stdout && !this.suppressStdout) {
-            process.stdout.write(text);
-          }
+          this.cpu.setReg(0, BigInt.asUintN(64, BigInt(totalWritten)));
+        } else if (syscallNum === 63) { // sys_read(fd, buf, count)
+          const fd = Number(this.cpu.getReg(0));
+          const bufAddr = Number(this.cpu.getReg(1));
+          const count = Number(this.cpu.getReg(2));
 
-          this.cpu.setReg(0, BigInt(count));
+          if (fd === 0) { // stdin
+            let bytesRead = 0;
+            if (this.onRead) {
+              const res = this.onRead(count);
+              if (res) {
+                const bytes = typeof res === "string" ? new TextEncoder().encode(res) : res;
+                for (let i = 0; i < Math.min(count, bytes.length); i++) {
+                  this.memory.write8(bufAddr + i, bytes[i]);
+                  bytesRead++;
+                }
+              }
+            } else if (this.stdinQueue.length > 0) {
+              while (bytesRead < count && this.stdinQueue.length > 0) {
+                this.memory.write8(bufAddr + bytesRead, this.stdinQueue.shift());
+                bytesRead++;
+              }
+            }
+            this.cpu.setReg(0, BigInt(bytesRead));
+          } else if (this.fds.has(fd)) {
+            const desc = this.fds.get(fd);
+            const avail = Math.max(0, desc.data.length - desc.pos);
+            const toRead = Math.min(count, avail);
+            for (let i = 0; i < toRead; i++) {
+              this.memory.write8(bufAddr + i, desc.data[desc.pos + i]);
+            }
+            desc.pos += toRead;
+            this.cpu.setReg(0, BigInt(toRead));
+          } else {
+            // Unsupported fd, return -EBADF (9)
+            this.cpu.setReg(0, BigInt.asUintN(64, -9n));
+          }
+        } else if (syscallNum === 214) { // sys_brk(brk)
+          const requestedBrk = this.cpu.getReg(0);
+          if (requestedBrk === 0n || requestedBrk < this.heapStart) {
+            // Return current program break
+            this.cpu.setReg(0, this.brk);
+          } else {
+            // Expand heap to requested address
+            this.brk = requestedBrk;
+            this.cpu.setReg(0, this.brk);
+          }
+        } else if (syscallNum === 222) { // sys_mmap(addr, length, prot, flags, fd, offset)
+          const addr = this.cpu.getReg(0);
+          const len = this.cpu.getReg(1);
+          // Allocate page-aligned chunk from mmap space
+          const alignedLen = (len + 4095n) & ~4095n;
+          let allocAddr = addr;
+          if (allocAddr === 0n) {
+            allocAddr = this.mmapCurrent;
+            this.mmapCurrent += alignedLen;
+          }
+          this.cpu.setReg(0, allocAddr);
+        } else if (syscallNum === 215 || syscallNum === 226) { // sys_munmap (215), sys_mprotect (226)
+          this.cpu.setReg(0, 0n);
+        } else if (syscallNum === 113) { // sys_clock_gettime(clk_id, tp)
+          const tpAddr = Number(this.cpu.getReg(1));
+          const nowMs = Date.now();
+          const sec = BigInt(Math.floor(nowMs / 1000));
+          const nsec = BigInt((nowMs % 1000) * 1_000_000);
+          this.memory.write64(tpAddr, sec);
+          this.memory.write64(tpAddr + 8, nsec);
+          this.cpu.setReg(0, 0n);
+        } else if (syscallNum === 160) { // sys_uname(buf)
+          const bufAddr = Number(this.cpu.getReg(0));
+          const writeField = (offset, text) => {
+            const bytes = new TextEncoder().encode(text);
+            for (let i = 0; i < 64; i++) {
+              this.memory.write8(bufAddr + offset + i, i < bytes.length ? bytes[i] : 0);
+            }
+            this.memory.write8(bufAddr + offset + 64, 0);
+          };
+          writeField(0, "Linux");
+          writeField(65, "mini-qemu");
+          writeField(130, "6.1.0-mini-qemu");
+          writeField(195, "#1 SMP Mini-QEMU");
+          writeField(260, "aarch64");
+          this.cpu.setReg(0, 0n);
+        } else if (syscallNum === 96 || syscallNum === 172 || syscallNum === 178) { // set_tid_address (96), getpid (172), gettid (178)
+          this.cpu.setReg(0, 1000n);
+        } else if (syscallNum === 278) { // sys_getrandom(buf, buflen, flags)
+          const bufAddr = Number(this.cpu.getReg(0));
+          const buflen = Number(this.cpu.getReg(1));
+          for (let i = 0; i < buflen; i++) {
+            this.memory.write8(bufAddr + i, ((i * 37) ^ 0x5c) & 0xff);
+          }
+          this.cpu.setReg(0, BigInt(buflen));
+        } else if (syscallNum === 80) { // sys_fstat(fd, statbuf)
+          const fd = Number(this.cpu.getReg(0));
+          const statBufAddr = Number(this.cpu.getReg(1));
+          if (fd >= 0 && fd <= 2) {
+            if (statBufAddr > 0) this.writeGuestStatStruct(statBufAddr, 0, true);
+            this.cpu.setReg(0, 0n);
+          } else if (this.fds.has(fd)) {
+            const desc = this.fds.get(fd);
+            if (statBufAddr > 0) this.writeGuestStatStruct(statBufAddr, desc.data.length, false);
+            this.cpu.setReg(0, 0n);
+          } else {
+            this.cpu.setReg(0, BigInt.asUintN(64, -9n)); // -EBADF
+          }
+        } else if (syscallNum === 79) { // sys_newfstatat(dirfd, pathname, statbuf, flags)
+          const pathAddr = Number(this.cpu.getReg(1));
+          const statBufAddr = Number(this.cpu.getReg(2));
+          const key = this.normalizeVfsPath(this.readGuestCString(pathAddr));
+          if (this.vfs.has(key)) {
+            const data = this.vfs.get(key);
+            if (statBufAddr > 0) this.writeGuestStatStruct(statBufAddr, data.length, false);
+            this.cpu.setReg(0, 0n);
+          } else {
+            this.cpu.setReg(0, BigInt.asUintN(64, -2n)); // -ENOENT
+          }
+        } else if (syscallNum === 29 || syscallNum === 25) { // sys_ioctl (29), sys_fcntl (25)
+          this.cpu.setReg(0, 0n);
         } else {
           throw new Error(`Unimplemented syscall number: ${syscallNum}`);
         }
