@@ -52,6 +52,18 @@ const BINARY_DESCRIPTIONS = {
     title: "Static Libc & Heap Demo",
     desc: "Demonstrates dynamic heap expansion via sys_brk (214), string operations, and stdout via sys_write (64).",
     category: "Static Libc & Syscalls"
+  },
+  "graphics_pattern.elf": {
+    name: "graphics_pattern.elf",
+    title: "Graphics Test Pattern (SMPTE)",
+    desc: "Level 1 MMIO graphics: Renders 8 vertical SMPTE color bars and 4 gradient ramps into VRAM (0x00800000).",
+    category: "Graphics & Framebuffer"
+  },
+  "plasma.elf": {
+    name: "plasma.elf",
+    title: "Demoscene Color Plasma",
+    desc: "Level 1 MMIO graphics: Procedural demoscene plasma field rendering 76,800 32-bit RGBA pixels into VRAM.",
+    category: "Graphics & Framebuffer"
   }
 };
 

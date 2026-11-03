@@ -180,19 +180,30 @@ Then open **`http://localhost:3000`** in your browser.
   * **ARM64 Disassembly:** Interactive instruction stream with clickable breakpoint gutters (`●`), resolved branch target addresses, and automatic `.ascii` embedded string detection.
   * **x86-64 Translator (`arm2x86`):** Live side-by-side translation of the loaded ARM64 binary into Intel/NASM x86-64 assembly and machine code bytes.
   * **Static AOT (`static_recompiler`):** Live lifted JavaScript module with a 1-click **⚡ Benchmark 5,000 Runs** button comparing Interpreter vs. AOT execution speed in the browser.
-* **Memory Hex & Call Stack Tabs:**
-  * **Memory Hex (256B):** Live hex dump with ASCII column, byte-write diff highlighting, and quick jumps (`.text`, `RAM`, `SP`).
+* **Memory Hex, Call Stack & Display Tabs:**
+  * **Memory Hex (256B):** Live hex dump with ASCII column, byte-write diff highlighting, and quick jumps (`.text`, `RAM`, `VRAM`, `SP`).
   * **Call Stack (`SP`):** 64-bit word stack inspector with live `← SP`, `← FP (X29)`, and `Return Addr` frame badges.
+  * **Level 1 Virtual Screen (320×240 VRAM):** Real-time hardware-accelerated `<canvas>` display reflecting memory-mapped VRAM (`0x00800000`–`0x0084B000`, 32-bit RGBA) with optional retro CRT scanlines, live FPS counter, and instant hex inspection.
 * **Guest Terminal:** Real-time capture of Linux `sys_write` (syscall 64) output and `sys_exit` status codes.
 * **Keyboard Shortcuts:** <kbd>Space</kbd> / <kbd>F5</kbd> (Run/Pause), <kbd>F10</kbd> / <kbd>S</kbd> (Step), <kbd>R</kbd> (Reset).
 
-### 3. Run Automated Test Suite
-Verifies bitfield instruction decoding, UI hooks, memory write tracking, and HTTP server endpoints:
+### 3. Run Level 1 Graphics & Framebuffer Demos
+Run bare-metal ARM64 programs rendering directly into memory-mapped Video RAM (`0x00800000`):
+```bash
+# SMPTE-style 8-bar test pattern and horizontal RGB gradients
+node src/emulator.js bin/graphics_pattern.elf
+
+# Procedural demoscene RGB plasma field (76,800 pixels)
+node src/emulator.js bin/plasma.elf
+```
+
+### 4. Run Automated Test Suite
+Verifies bitfield instruction decoding, UI hooks, memory write tracking, Linux ABI/TLS, system calls, and Level 1 graphics framebuffer:
 ```bash
 npm test
 ```
 
-### 4. Run the Fibonacci Program in the CLI Interpreter
+### 5. Run the Fibonacci Program in the CLI Interpreter
 Executes [bin/fib.elf](bin/fib.elf) step by step, computing the 10th Fibonacci number ($F_{10} = 55$) with cycle tracing:
 ```bash
 npm start

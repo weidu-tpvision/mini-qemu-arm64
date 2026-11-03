@@ -49,7 +49,10 @@ try {
   assert.ok(binaries.length >= 4, `Expected at least 4 binaries, got ${binaries.length}`);
   const fib = binaries.find(b => b.filename === "fib.elf");
   assert.ok(fib, "fib.elf must be in the list");
-  console.log(`[PASS] /api/binaries returned ${binaries.length} binaries`);
+  const graphicsBin = binaries.find(b => b.filename === "graphics_pattern.elf");
+  assert.ok(graphicsBin, "graphics_pattern.elf must be in the list");
+  assert.strictEqual(graphicsBin.category, "Graphics & Framebuffer");
+  console.log(`[PASS] /api/binaries returned ${binaries.length} binaries including graphics catalog`);
 
   // 2. Test /bin/fib.elf raw binary download
   const binRes = await fetchUrl("/bin/fib.elf");

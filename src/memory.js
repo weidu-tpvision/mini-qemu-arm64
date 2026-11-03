@@ -1,8 +1,16 @@
 // memory.js - Page-Based Virtual Memory for Mini-QEMU (4 KB Pages, Little-Endian)
 
-const PAGE_SIZE = 4096; // 4 KB page size
-const PAGE_MASK = PAGE_SIZE - 1;
-const PAGE_SHIFT = 12;
+export const PAGE_SIZE = 4096; // 4 KB page size
+export const PAGE_MASK = PAGE_SIZE - 1;
+export const PAGE_SHIFT = 12;
+
+// --- Level 1 MMIO Framebuffer Constants ---
+export const VRAM_BASE = 0x00800000;
+export const FB_WIDTH = 320;
+export const FB_HEIGHT = 240;
+export const FB_BPP = 4; // 32-bit RGBA (4 bytes per pixel)
+export const FB_SIZE = FB_WIDTH * FB_HEIGHT * FB_BPP; // 307,200 bytes (0x4B000)
+export const VRAM_END = VRAM_BASE + FB_SIZE; // 0x0084B000
 
 export class Memory {
   constructor() {
@@ -10,6 +18,8 @@ export class Memory {
     this.pages = new Map();
     // Track addresses written during the latest instruction cycle
     this.lastWritten = new Set();
+    // Track whether VRAM has mutated since last screen refresh
+    this.vramDirty = false;
   }
 
   // Get or allocate a 4 KB page
@@ -54,6 +64,10 @@ export class Memory {
     const page = this._getPage(pageIndex, true);
     page[offset] = value & 0xff;
     this.lastWritten.add(numAddr);
+
+    if (numAddr >= VRAM_BASE && numAddr < VRAM_END) {
+      this.vramDirty = true;
+    }
   }
 
   // Read 16-bit little-endian integer
@@ -109,15 +123,53 @@ export class Memory {
     this.pages.clear();
     this.segments = [];
     this.lastWritten.clear();
+    this.vramDirty = false;
   }
 
-  // Read consecutive bytes into a Uint8Array (for UI memory hex view)
-  readBlock(addr, length) {
-    const start = Number(addr);
-    const result = new Uint8Array(length);
-    for (let i = 0; i < length; i++) {
-      result[i] = this.read8(start + i);
+  // High-performance page-by-page block read into existing typed array
+  readBlockInto(addr, targetArray, targetOffset = 0, length = targetArray.length) {
+    let currentAddr = Number(addr);
+    let bytesRemaining = length;
+    let dst = targetOffset;
+
+    while (bytesRemaining > 0) {
+      const pageIndex = Math.floor(currentAddr / PAGE_SIZE);
+      const pageOffset = currentAddr & PAGE_MASK;
+      const bytesInPage = Math.min(bytesRemaining, PAGE_SIZE - pageOffset);
+      const page = this.pages.get(pageIndex);
+
+      if (page) {
+        targetArray.set(page.subarray(pageOffset, pageOffset + bytesInPage), dst);
+      } else {
+        targetArray.fill(0, dst, dst + bytesInPage);
+      }
+
+      currentAddr += bytesInPage;
+      dst += bytesInPage;
+      bytesRemaining -= bytesInPage;
     }
+  }
+
+  // Read consecutive bytes into a new Uint8Array (for UI memory hex view & tests)
+  readBlock(addr, length) {
+    const result = new Uint8Array(length);
+    this.readBlockInto(addr, result, 0, length);
     return result;
+  }
+
+  // Read entire VRAM framebuffer (320x240 RGBA, 307200 bytes)
+  readVram(targetArray = null) {
+    const buffer = targetArray || new Uint8ClampedArray(FB_SIZE);
+    this.readBlockInto(VRAM_BASE, buffer, 0, FB_SIZE);
+    return buffer;
+  }
+
+  // Check and clear VRAM dirty status
+  isVramDirty() {
+    return this.vramDirty;
+  }
+
+  clearVramDirty() {
+    this.vramDirty = false;
   }
 }

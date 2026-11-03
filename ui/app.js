@@ -56,8 +56,27 @@ const memNextBtn = document.getElementById("memNextBtn");
 const jumpTextBtn = document.getElementById("jumpTextBtn");
 const jumpStackBtn = document.getElementById("jumpStackBtn");
 const jumpDataBtn = document.getElementById("jumpDataBtn");
+const jumpVramBtn = document.getElementById("jumpVramBtn");
+const jumpVramHexBtn = document.getElementById("jumpVramHexBtn");
+const clearScreenBtn = document.getElementById("clearScreenBtn");
 const hexTableBody = document.getElementById("hexTableBody");
 const stackTableBody = document.getElementById("stackTableBody");
+
+// Level 1 MMIO Virtual Screen Elements & Framebuffer State
+const vramCanvas = document.getElementById("vramCanvas");
+const vramCtx = vramCanvas ? vramCanvas.getContext("2d") : null;
+const scanlineOverlay = document.getElementById("scanlineOverlay");
+const crtScanlineToggle = document.getElementById("crtScanlineToggle");
+const vramFrameCount = document.getElementById("vramFrameCount");
+const vramFpsBadge = document.getElementById("vramFpsBadge");
+const vramStatusText = document.getElementById("vramStatusText");
+const FB_WIDTH = 320;
+const FB_HEIGHT = 240;
+const FB_SIZE = FB_WIDTH * FB_HEIGHT * 4;
+let vramImageData = vramCtx ? vramCtx.createImageData(FB_WIDTH, FB_HEIGHT) : null;
+let renderedFrames = 0;
+let lastFpsTime = performance.now();
+let frameCounterInSec = 0;
 
 // Emulator Instance & Runtime State
 const emulator = new MiniQEMU();
@@ -556,7 +575,44 @@ function updateTranslatedViews(buffer, name) {
   }
 }
 
-// 6. Execution Step & Loop Control
+// 6. Level 1 MMIO Virtual Screen Renderer
+function renderVramScreen(force = false) {
+  if (!vramCtx || !vramImageData) return;
+  if (!force && !emulator.isVramDirty()) return;
+
+  emulator.getVramBuffer(vramImageData.data);
+  vramCtx.putImageData(vramImageData, 0, 0);
+  emulator.clearVramDirty();
+  renderedFrames++;
+
+  if (vramFrameCount) vramFrameCount.textContent = renderedFrames;
+  if (vramStatusText) {
+    vramStatusText.textContent = emulator.cpu.halted ? "Frame Ready" : "Rendering";
+    vramStatusText.className = emulator.cpu.halted ? "text-emerald" : "text-cyan";
+  }
+
+  frameCounterInSec++;
+  const now = performance.now();
+  if (now - lastFpsTime >= 1000) {
+    if (vramFpsBadge) {
+      const fps = Math.round((frameCounterInSec * 1000) / (now - lastFpsTime));
+      vramFpsBadge.textContent = `${fps} FPS`;
+    }
+    frameCounterInSec = 0;
+    lastFpsTime = now;
+  }
+}
+
+function clearVramScreen() {
+  if (!vramCtx || !vramImageData) return;
+  for (let i = 0; i < FB_SIZE; i += 4) {
+    emulator.memory.write32(0x00800000 + i, 0xff000000); // Opaque black
+  }
+  renderVramScreen(true);
+  appendTerminal("[Screen] Framebuffer cleared (0x00800000).\n");
+}
+
+// 7. Execution Step & Loop Control
 function stepSingle() {
   if (emulator.cpu.halted) return;
 
@@ -567,9 +623,11 @@ function stepSingle() {
   updateCPUState(res.changedRegs);
   updateDisassemblyPointer();
   updateMemoryGrid(currentMemAddr);
+  renderVramScreen();
 
   if (res.halted) {
     stopRunning();
+    renderVramScreen(true);
   } else if (res.hitBreakpoint) {
     stopRunning();
     setStatus("PAUSED", `BP @ 0x${res.nextPC.toString(16).padStart(8, "0")}`, "status-paused");
@@ -592,13 +650,15 @@ function startRunning() {
     function turboLoop() {
       if (!isRunning || emulator.cpu.halted) return;
       let lastRes = null;
-      for (let i = 0; i < 60; i++) {
+      const batchSize = 2500; // Efficient chunk size for graphics and math loops
+      for (let i = 0; i < batchSize; i++) {
         lastRes = emulator.step(false);
         if (lastRes.halted || lastRes.hitBreakpoint) {
           changedMemoryBytes = new Set(lastRes.changedMem || []);
           updateCPUState(lastRes.changedRegs);
           updateDisassemblyPointer();
           updateMemoryGrid(currentMemAddr);
+          renderVramScreen(true);
           if (lastRes.hitBreakpoint) {
             stopRunning();
             setStatus("PAUSED", `BP @ 0x${lastRes.nextPC.toString(16)}`, "status-paused");
@@ -612,6 +672,7 @@ function startRunning() {
       }
       updateDisassemblyPointer();
       updateMemoryGrid(currentMemAddr);
+      renderVramScreen();
       runTimer = requestAnimationFrame(turboLoop);
     }
     runTimer = requestAnimationFrame(turboLoop);
@@ -619,6 +680,7 @@ function startRunning() {
     runTimer = setInterval(() => {
       if (!isRunning || emulator.cpu.halted) {
         stopRunning();
+        renderVramScreen(true);
         return;
       }
       stepSingle();
@@ -640,6 +702,7 @@ function stopRunning() {
   if (!emulator.cpu.halted) {
     setStatus("PAUSED", "PAUSED", "status-paused");
   }
+  renderVramScreen(true);
 }
 
 function resetEmulator() {
@@ -650,6 +713,7 @@ function resetEmulator() {
   updateCPUState();
   updateDisassemblyPointer();
   updateMemoryGrid(currentMemAddr);
+  renderVramScreen(true);
   setStatus("READY", "READY", "status-ready");
   appendTerminal(`[Mini-QEMU] Reset to entry point 0x${emulator.cpu.pc.toString(16).padStart(8, "0")}.\n`);
 }
@@ -692,6 +756,17 @@ function loadBinaryBuffer(buffer, filename, desc = "") {
 
   setStatus("READY", "READY", "status-ready");
   appendTerminal(`[Mini-QEMU] Loaded "${filename}" (${buffer.byteLength}B) -> Entry 0x${entry.toString(16).padStart(8, "0")}\n`);
+
+  const isGraphics = filename.includes("graphics") || filename.includes("plasma") || filename.includes("pattern") || filename.includes("screen") || filename.includes("framebuffer");
+  if (isGraphics) {
+    document.querySelectorAll(".mem-tab-btn").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".mem-tab-content").forEach(c => { c.style.display = "none"; });
+    const screenTabBtn = document.querySelector('[data-memtab="screenView"]');
+    if (screenTabBtn) screenTabBtn.classList.add("active");
+    const screenView = document.getElementById("screenView");
+    if (screenView) screenView.style.display = "block";
+    renderVramScreen(true);
+  }
 }
 
 async function loadBinariesList() {
@@ -769,11 +844,15 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
 document.querySelectorAll(".mem-tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".mem-tab-btn").forEach(b => b.classList.remove("active"));
-    document.getElementById("hexView").style.display = "none";
-    document.getElementById("stackView").style.display = "none";
+    document.querySelectorAll(".mem-tab-content").forEach(c => { c.style.display = "none"; });
     btn.classList.add("active");
     const target = document.getElementById(btn.dataset.memtab);
-    if (target) target.style.display = "block";
+    if (target) {
+      target.style.display = "block";
+      if (btn.dataset.memtab === "screenView") {
+        renderVramScreen(true);
+      }
+    }
   });
 });
 
@@ -840,6 +919,39 @@ memNextBtn.addEventListener("click", () => updateMemoryGrid(currentMemAddr + 64)
 jumpTextBtn.addEventListener("click", () => updateMemoryGrid(Number(emulator.entryPoint || 0x00400000)));
 jumpDataBtn.addEventListener("click", () => updateMemoryGrid(0x00402000));
 jumpStackBtn.addEventListener("click", () => updateMemoryGrid(Number(emulator.cpu.sp) - 32));
+
+if (jumpVramBtn) {
+  jumpVramBtn.addEventListener("click", () => {
+    // Switch to hex view and jump to VRAM base
+    document.querySelectorAll(".mem-tab-btn").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".mem-tab-content").forEach(c => { c.style.display = "none"; });
+    const hexBtn = document.querySelector('[data-memtab="hexView"]');
+    if (hexBtn) hexBtn.classList.add("active");
+    const hexView = document.getElementById("hexView");
+    if (hexView) hexView.style.display = "block";
+    updateMemoryGrid(0x00800000);
+  });
+}
+
+if (jumpVramHexBtn) {
+  jumpVramHexBtn.addEventListener("click", () => {
+    if (jumpVramBtn) jumpVramBtn.click();
+  });
+}
+
+if (clearScreenBtn) {
+  clearScreenBtn.addEventListener("click", clearVramScreen);
+}
+
+if (crtScanlineToggle && scanlineOverlay) {
+  crtScanlineToggle.addEventListener("change", (e) => {
+    if (e.target.checked) {
+      scanlineOverlay.classList.remove("disabled");
+    } else {
+      scanlineOverlay.classList.add("disabled");
+    }
+  });
+}
 
 pcBox.addEventListener("click", () => updateMemoryGrid(Number(emulator.cpu.pc)));
 spBox.addEventListener("click", () => updateMemoryGrid(Number(emulator.cpu.sp) - 32));

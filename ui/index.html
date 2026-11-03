@@ -198,14 +198,15 @@
       </div>
     </section>
 
-    <!-- Panel 4: Memory Hex Inspector & Live Stack Frames -->
+    <!-- Panel 4: Memory Hex Inspector, Live Stack Frames & Virtual Screen -->
     <section class="panel memory-panel">
       <div class="panel-header">
         <div class="tab-group">
           <button class="mem-tab-btn active" data-memtab="hexView">Memory Hex</button>
           <button class="mem-tab-btn" data-memtab="stackView">Call Stack (SP)</button>
+          <button class="mem-tab-btn" data-memtab="screenView">📺 Display (VRAM)</button>
         </div>
-        <span class="header-info">4 KB Pages</span>
+        <span class="header-info" id="vramHeaderBadge">320×240 Framebuffer</span>
       </div>
 
       <!-- Address jumper & quick buttons -->
@@ -217,12 +218,13 @@
         <div class="quick-jumps">
           <button class="quick-jump-btn" id="jumpTextBtn" title="Jump to .text Entry Point">.text</button>
           <button class="quick-jump-btn" id="jumpDataBtn" title="Jump to RAM Data (0x00402000)">RAM</button>
+          <button class="quick-jump-btn" id="jumpVramBtn" title="Jump to VRAM Framebuffer (0x00800000)">VRAM</button>
           <button class="quick-jump-btn" id="jumpStackBtn" title="Jump to Stack Pointer (SP)">SP</button>
         </div>
       </div>
 
       <!-- Tab 1: Hex Grid View -->
-      <div class="panel-body" id="hexView">
+      <div class="panel-body mem-tab-content" id="hexView">
         <table class="hex-table">
           <thead>
             <tr>
@@ -238,7 +240,7 @@
       </div>
 
       <!-- Tab 2: Dedicated 64-bit Call Stack & Frame Inspector -->
-      <div class="panel-body" id="stackView" style="display: none;">
+      <div class="panel-body mem-tab-content" id="stackView" style="display: none;">
         <table class="regs-table">
           <thead>
             <tr>
@@ -251,6 +253,34 @@
             <!-- Populated dynamically -->
           </tbody>
         </table>
+      </div>
+
+      <!-- Tab 3: Level 1 MMIO Virtual Screen / Framebuffer (320x240) -->
+      <div class="panel-body mem-tab-content" id="screenView" style="display: none;">
+        <div class="screen-container">
+          <div class="screen-toolbar">
+            <div class="screen-meta">
+              <span class="screen-badge">320×240 RGBA</span>
+              <span class="screen-badge vram-addr">VRAM: 0x00800000</span>
+            </div>
+            <div class="screen-actions">
+              <label class="crt-toggle-label" title="Toggle CRT scanline raster effect">
+                <input type="checkbox" id="crtScanlineToggle" checked> Scanlines
+              </label>
+              <button class="quick-jump-btn" id="jumpVramHexBtn" title="Inspect VRAM in Hex View">Hex</button>
+              <button class="quick-jump-btn" id="clearScreenBtn" title="Clear Screen Buffer">Clear</button>
+            </div>
+          </div>
+          <div class="canvas-wrapper">
+            <canvas id="vramCanvas" width="320" height="240"></canvas>
+            <div class="scanline-overlay" id="scanlineOverlay"></div>
+          </div>
+          <div class="screen-footer">
+            <span>Frames: <span id="vramFrameCount" class="mono">0</span></span>
+            <span id="vramFpsBadge" class="mono">0 FPS</span>
+            <span>Status: <span id="vramStatusText" class="text-accent">Standby</span></span>
+          </div>
+        </div>
       </div>
     </section>
   </main>

@@ -1,5 +1,5 @@
 // emulator.js - Mini-QEMU ARM64 User-Space Emulator (32+ Core Instructions)
-import { Memory } from "./memory.js";
+import { Memory, VRAM_BASE, FB_WIDTH, FB_HEIGHT, FB_BPP, FB_SIZE, VRAM_END } from "./memory.js";
 import { CPU } from "./cpu.js";
 import { Decoder, InstructionType, ConditionCode } from "./decoder.js";
 import { ElfLoader } from "./elf_loader.js";
@@ -239,6 +239,51 @@ export class MiniQEMU {
     this.memory.loadProgram(loadAddress, instructions);
     this.cpu.pc = BigInt(loadAddress);
     this.memory.lastWritten.clear();
+  }
+
+  // --- Level 1 MMIO Graphics Framebuffer Helpers ---
+  getVramBuffer(targetArray = null) {
+    return this.memory.readVram(targetArray);
+  }
+
+  isVramDirty() {
+    return this.memory.isVramDirty();
+  }
+
+  clearVramDirty() {
+    this.memory.clearVramDirty();
+  }
+
+  getVramInfo() {
+    return {
+      base: VRAM_BASE,
+      end: VRAM_END,
+      width: FB_WIDTH,
+      height: FB_HEIGHT,
+      bpp: FB_BPP,
+      sizeBytes: FB_SIZE,
+      isDirty: this.memory.isVramDirty()
+    };
+  }
+
+  writeVramPixel(x, y, r, g, b, a = 255) {
+    if (x < 0 || x >= FB_WIDTH || y < 0 || y >= FB_HEIGHT) return;
+    const offset = VRAM_BASE + (y * FB_WIDTH + x) * FB_BPP;
+    this.memory.write8(offset + 0, r);
+    this.memory.write8(offset + 1, g);
+    this.memory.write8(offset + 2, b);
+    this.memory.write8(offset + 3, a);
+  }
+
+  readVramPixel(x, y) {
+    if (x < 0 || x >= FB_WIDTH || y < 0 || y >= FB_HEIGHT) return { r: 0, g: 0, b: 0, a: 0 };
+    const offset = VRAM_BASE + (y * FB_WIDTH + x) * FB_BPP;
+    return {
+      r: this.memory.read8(offset + 0),
+      g: this.memory.read8(offset + 1),
+      b: this.memory.read8(offset + 2),
+      a: this.memory.read8(offset + 3)
+    };
   }
 
   // Apply ARM64 barrel shifter (00=LSL, 01=LSR, 10=ASR)
