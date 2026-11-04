@@ -73,6 +73,25 @@ export const InstructionType = {
   MRS: "MRS",           // Move System Register to general-purpose register (e.g. TPIDR_EL0)
   MSR: "MSR",           // Move general-purpose register to System Register (e.g. TPIDR_EL0)
 
+  // System Hints & Barriers
+  NOP: "NOP",
+  YIELD: "YIELD",
+  DMB: "DMB",
+  DSB: "DSB",
+  ISB: "ISB",
+
+  // Bit Manipulation & Byte Reversal
+  CLZ: "CLZ",
+  REV: "REV",
+  REV16: "REV16",
+  REV32: "REV32",
+  RBIT: "RBIT",
+  EXTR: "EXTR",
+
+  // Exclusive Atomics (Single-threaded user space)
+  LDXR: "LDXR",
+  STXR: "STXR",
+
   // --- Floating-Point (Scalar VFP) ---
   FADD: "FADD",         // Floating-point Add (Single/Double)
   FSUB: "FSUB",         // Floating-point Subtract
@@ -395,6 +414,30 @@ export class Decoder {
       }
     }
 
+    // Extract (EXTR / ROR imm): op1 == 111
+    if (op1 === 0b111 && ((raw >>> 29) & 0b11) === 0b00) {
+      const sf = (raw >>> 31) & 1;
+      const rm = (raw >>> 16) & 0x1f;
+      const imms = (raw >>> 10) & 0x3f;
+      const rn = (raw >>> 5) & 0x1f;
+      const rd = raw & 0x1f;
+      const reg = sf ? "x" : "w";
+      const lsb = imms & (sf ? 63 : 31);
+      const disasm = (rn === rm)
+        ? `ror ${reg}${rd}, ${reg}${rn}, #${lsb}`
+        : `extr ${reg}${rd}, ${reg}${rn}, ${reg}${rm}, #${lsb}`;
+      return {
+        type: InstructionType.EXTR,
+        raw,
+        sf,
+        rd,
+        rn,
+        rm,
+        lsb,
+        disassembly: disasm
+      };
+    }
+
     return { type: InstructionType.UNKNOWN, raw, disassembly: `unknown imm 0x${raw.toString(16)}` };
   }
 
@@ -522,6 +565,23 @@ export class Decoder {
       };
     }
 
+    // 5b. System hints and barriers (NOP, YIELD, WFE, WFI, DMB, DSB, ISB)
+    if (((raw >>> 16) & 0xffff) === 0xd503) {
+      const crn = (raw >>> 12) & 0xf;
+      const op2 = (raw >>> 5) & 0x7;
+      if (crn === 2) {
+        if (op2 === 0) return { type: InstructionType.NOP, raw, disassembly: "nop" };
+        if (op2 === 1) return { type: InstructionType.YIELD, raw, disassembly: "yield" };
+        if (op2 === 2) return { type: InstructionType.NOP, raw, disassembly: "wfe" };
+        if (op2 === 3) return { type: InstructionType.NOP, raw, disassembly: "wfi" };
+      } else if (crn === 3) {
+        if (op2 === 5) return { type: InstructionType.DMB, raw, disassembly: "dmb sy" };
+        if (op2 === 4) return { type: InstructionType.DSB, raw, disassembly: "dsb sy" };
+        if (op2 === 6) return { type: InstructionType.ISB, raw, disassembly: "isb" };
+      }
+      return { type: InstructionType.NOP, raw, disassembly: "nop" };
+    }
+
     // 6. System Register Move (MRS / MSR): bits [31:22] = 0b1101010100 (0x354)
     if ((raw >>> 22) === 0b1101010100) {
       const lBit = (raw >>> 21) & 1; // 0 = MSR (write sysreg), 1 = MRS (read sysreg)
@@ -611,13 +671,29 @@ export class Decoder {
       }
     }
 
-    // Divide (SDIV / UDIV): bits [28:21] = 0b11010110, bits [15:10] = 00001x
+    // Divide / Shifts (2-source) and Bit reversal / CLZ (1-source): bits [28:21] = 0b11010110
     if (((raw >>> 21) & 0xff) === 0b11010110) {
       const rm = (raw >>> 16) & 0x1f;
       const opcode = (raw >>> 10) & 0b111111;
       const rn = (raw >>> 5) & 0x1f;
       const rd = raw & 0x1f;
       const regPrefix = sf ? "x" : "w";
+
+      if (rm === 0) { // 1-source operations: RBIT, REV16, REV, REV32, CLZ
+        if (opcode === 0b000000) {
+          return { type: InstructionType.RBIT, raw, sf, rd, rn, disassembly: `rbit ${regPrefix}${rd}, ${regPrefix}${rn}` };
+        } else if (opcode === 0b000001) {
+          return { type: InstructionType.REV16, raw, sf, rd, rn, disassembly: `rev16 ${regPrefix}${rd}, ${regPrefix}${rn}` };
+        } else if (opcode === 0b000010) {
+          const type = sf ? InstructionType.REV32 : InstructionType.REV;
+          const name = sf ? "rev32" : "rev";
+          return { type, raw, sf, rd, rn, disassembly: `${name} ${regPrefix}${rd}, ${regPrefix}${rn}` };
+        } else if (opcode === 0b000011 && sf === 1) {
+          return { type: InstructionType.REV, raw, sf, rd, rn, disassembly: `rev x${rd}, x${rn}` };
+        } else if (opcode === 0b000100) {
+          return { type: InstructionType.CLZ, raw, sf, rd, rn, disassembly: `clz ${regPrefix}${rd}, ${regPrefix}${rn}` };
+        }
+      }
 
       if (opcode === 0b000010) { // UDIV
         return { type: InstructionType.UDIV, raw, sf, rd, rn, rm, disassembly: `udiv ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
@@ -629,6 +705,8 @@ export class Decoder {
         return { type: InstructionType.LSR, raw, sf, rd, rn, rm, isRegShift: true, disassembly: `lsr ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
       } else if (opcode === 0b001010) { // ASRV
         return { type: InstructionType.ASR, raw, sf, rd, rn, rm, isRegShift: true, disassembly: `asr ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
+      } else if (opcode === 0b001011) { // RORV
+        return { type: InstructionType.EXTR, raw, sf, rd, rn, rm, isRegShift: true, disassembly: `ror ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
       }
     }
 
@@ -774,6 +852,40 @@ export class Decoder {
   // --- 4. Loads and Stores ---
   static _decodeLoadsAndStores(raw) {
     const isVec = ((raw >>> 26) & 1) === 1;
+
+    // 4.0 Load / Store Exclusive (LDXR / STXR): bits [29:24] = 001000
+    if (!isVec && ((raw >>> 24) & 0x3f) === 0b001000) {
+      const size = (raw >>> 30) & 0b11;
+      const lBit = (raw >>> 22) & 1; // 1 = LDXR, 0 = STXR
+      const rs = (raw >>> 16) & 0x1f; // status register for STXR
+      const rn = (raw >>> 5) & 0x1f;
+      const rt = raw & 0x1f;
+      const sf = size === 0b11 ? 1 : 0;
+      const regPrefix = sf ? "x" : "w";
+      const baseName = rn === 31 ? "sp" : `x${rn}`;
+      if (lBit === 1) {
+        return {
+          type: InstructionType.LDXR,
+          raw,
+          sf,
+          size,
+          rt,
+          rn,
+          disassembly: `ldxr ${regPrefix}${rt}, [${baseName}]`
+        };
+      } else {
+        return {
+          type: InstructionType.STXR,
+          raw,
+          sf,
+          size,
+          rs,
+          rt,
+          rn,
+          disassembly: `stxr w${rs}, ${regPrefix}${rt}, [${baseName}]`
+        };
+      }
+    }
 
     // 4.1 Load / Store Pair (STP / LDP): bits [29:27] = 101
     // Addressing modes in bits [24:23]: 01 = Post-index, 10 = Signed offset, 11 = Pre-index

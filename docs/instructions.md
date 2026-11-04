@@ -189,14 +189,30 @@ Used extensively by compilers (`gcc`, `clang`) for stack allocation and function
 | `SVC #0` | `svc #0` | Supervisor Call (Linux Syscall trap) | Dispatches syscall using number in `X8`, arguments in `X0`–`X5`, returns status in `X0`. |
 | `MRS` | `mrs Xt, TPIDR_EL0` | Move Thread Pointer to Register | Returns thread-local storage (TLS) pointer base address. |
 | `MSR` | `msr TPIDR_EL0, Xt` | Move Register to Thread Pointer | Configures TLS base address (used by `__set_thread_area` / `musl`). |
+| `NOP` | `nop` | No Operation | Program counter advances by 4 bytes. |
+| `YIELD` | `yield` | Hint: Yield thread execution | Execution yield hint to scheduler / frame synchronizer. |
+| `DMB` / `DSB` / `ISB` | `dmb sy` / `dsb sy` / `isb` | Memory and Instruction Barriers | Ensures memory visibility / synchronization barriers (no-op in uniprocessor guest). |
+| `CLZ` | `clz Wd, Wn` / `clz Xd, Xn` | Count Leading Zeros | Computes number of leading zero bits (0 to 32/64). Used in allocators & printf. |
+| `REV` | `rev Wd, Wn` / `rev Xd, Xn` | Byte Reverse (Endianness Swap) | Reverses byte order (e.g. `htonl` / `ntohl` 32-bit and 64-bit). |
+| `REV16` | `rev16 Wd, Wn` / `rev16 Xd, Xn` | Byte Reverse in Halfwords | Reverses bytes in each 16-bit halfword (e.g. `htons` / `ntohs`). |
+| `REV32` | `rev32 Xd, Xn` | Byte Reverse in Words | Reverses bytes in each 32-bit word of a 64-bit register. |
+| `RBIT` | `rbit Wd, Wn` / `rbit Xd, Xn` | Bit Reverse | Reverses order of all 32 or 64 bits. |
+| `EXTR` | `extr Xd, Xn, Xm, #lsb` | Extract Register from Pair | Extracts bits `[lsb+63 : lsb]` from concatenated registers (`ROR` if Xn == Xm). |
+| `LDXR` | `ldxr Xt, [Xn]` / `ldxr Wt, [Xn]` | Load-Exclusive Register | Atomic load; records exclusive access monitor. |
+| `STXR` | `stxr Ws, Xt, [Xn]` | Store-Exclusive Register | Atomic store; returns status `Ws = 0` on exclusive success. |
 
 #### Supported Linux System Calls (`SVC #0`)
-* `sys_openat` (56), `sys_close` (57), `sys_read` (63), `sys_write` (64), `sys_writev` (66), `sys_lseek` (62), `sys_fstat` (80), `sys_newfstatat` (79), `sys_unlinkat` (35), `sys_getcwd` (17): In-memory Virtual File System (VFS).
-* `sys_exit` (93), `sys_exit_group` (94): Process and thread termination.
-* `sys_brk` (214): Heap management (query, expansion, sub-page contraction).
-* `sys_mmap` (222), `sys_munmap` (215), `sys_mprotect` (226): Anonymous virtual memory allocation and reclamation.
+* `sys_openat` (56), `sys_close` (57), `sys_read` (63), `sys_readv` (65, scatter-gather read), `sys_write` (64), `sys_writev` (66, scatter-gather write), `sys_lseek` (62), `sys_fstat` (80), `sys_newfstatat` (79), `sys_unlinkat` (35), `sys_getcwd` (17), `sys_dup` (23), `sys_dup3` (24), `sys_pipe2` (59), `sys_fcntl` (25), `sys_ioctl` (29): In-memory Virtual File System (VFS) and standard I/O descriptor table.
+* `sys_exit` (93), `sys_exit_group` (94), `sys_kill` (129), `sys_tkill` (130), `sys_tgkill` (131): Process and thread termination & signal delivery.
+* `sys_brk` (214): Dynamic heap management (query, expansion, sub-page contraction).
+* `sys_mmap` (222), `sys_munmap` (215), `sys_mprotect` (226), `sys_madvise` (233): Virtual memory allocation, reclamation, and advice.
+* `sys_futex` (98): Fast Userspace Mutex (`FUTEX_WAIT`, `FUTEX_WAKE`, `FUTEX_REQUEUE`).
+* `sys_set_robust_list` (99), `sys_set_tid_address` (96), `sys_prlimit64` (261): Thread and resource limits initialization.
+* `sys_rt_sigaction` (134), `sys_rt_sigprocmask` (135), `sys_sigaltstack` (132): Signal handler management stubs.
+* `sys_clock_gettime` (113), `sys_gettimeofday` (169), `sys_nanosleep` (101), `sys_clock_nanosleep` (115): Hardware and epoch clocks.
+* `sys_getrandom` (278), `sys_uname` (160), `sys_getpid` (172), `sys_getppid` (173), `sys_gettid` (178), `sys_getuid` (174), `sys_geteuid` (175), `sys_getgid` (176), `sys_getegid` (177): Process identity and entropy.
 * `sys_sched_yield` (124): Frame-yield MMIO synchronization for 60 FPS VSync loop.
-* `sys_clock_gettime` (113), `sys_getrandom` (278), `sys_uname` (160), `sys_getpid` (172), `sys_gettid` (178), `sys_set_tid_address` (96): Core Linux runtime primitives.
+* `sys_statx` (291), `sys_rseq` (293), and unknown syscalls: Return official Linux `-ENOSYS` (-38) error code, enabling graceful fallback for libc feature detection.
 
 ---
 

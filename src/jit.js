@@ -1328,6 +1328,134 @@ export class JitCompiler {
           }
           break;
 
+        case InstructionType.NOP:
+        case InstructionType.DMB:
+        case InstructionType.DSB:
+        case InstructionType.ISB:
+          lines.push(`// nop / barrier`);
+          break;
+
+        case InstructionType.YIELD:
+          lines.push(`// yield`);
+          break;
+
+        case InstructionType.CLZ: {
+          const bits = decoded.sf === 0 ? 32 : 64;
+          if (decoded.sf === 0) {
+            lines.push(`x[${decoded.rd}] = BigInt(Math.clz32(Number(${regExpr(decoded.rn)} & 0xffffffffn)));`);
+          } else {
+            lines.push(`{`);
+            lines.push(`  const val = ${regExpr(decoded.rn)};`);
+            lines.push(`  const hi = Number((val >> 32n) & 0xffffffffn);`);
+            lines.push(`  const lo = Number(val & 0xffffffffn);`);
+            lines.push(`  x[${decoded.rd}] = BigInt(hi !== 0 ? Math.clz32(hi) : (32 + Math.clz32(lo)));`);
+            lines.push(`}`);
+          }
+          break;
+        }
+
+        case InstructionType.REV: {
+          if (decoded.sf === 0) {
+            lines.push(`{`);
+            lines.push(`  const v = Number(${regExpr(decoded.rn)} & 0xffffffffn);`);
+            lines.push(`  const r = ((v & 0xff) << 24) | (((v >> 8) & 0xff) << 16) | (((v >> 16) & 0xff) << 8) | ((v >>> 24) & 0xff);`);
+            lines.push(`  x[${decoded.rd}] = BigInt(r >>> 0);`);
+            lines.push(`}`);
+          } else {
+            lines.push(`{`);
+            lines.push(`  const val = ${regExpr(decoded.rn)};`);
+            lines.push(`  let r = 0n;`);
+            lines.push(`  for (let b = 0n; b < 8n; b++) r = (r << 8n) | ((val >> (b * 8n)) & 0xffn);`);
+            lines.push(`  x[${decoded.rd}] = r;`);
+            lines.push(`}`);
+          }
+          break;
+        }
+
+        case InstructionType.REV16: {
+          const bits = decoded.sf === 0 ? 32 : 64;
+          lines.push(`{`);
+          lines.push(`  const val = ${regExpr(decoded.rn)};`);
+          lines.push(`  let r = 0n;`);
+          lines.push(`  for (let h = 0; h < ${bits / 16}; h++) {`);
+          lines.push(`    const shift = BigInt(h * 16);`);
+          lines.push(`    const hw = Number((val >> shift) & 0xffffn);`);
+          lines.push(`    const swapped = ((hw & 0xff) << 8) | ((hw >> 8) & 0xff);`);
+          lines.push(`    r |= (BigInt(swapped) << shift);`);
+          lines.push(`  }`);
+          lines.push(`  x[${decoded.rd}] = r;`);
+          lines.push(`}`);
+          break;
+        }
+
+        case InstructionType.REV32: {
+          lines.push(`{`);
+          lines.push(`  const val = ${regExpr(decoded.rn)};`);
+          lines.push(`  const lo = Number(val & 0xffffffffn);`);
+          lines.push(`  const hi = Number((val >> 32n) & 0xffffffffn);`);
+          lines.push(`  const sw = v => ((v & 0xff) << 24) | (((v >> 8) & 0xff) << 16) | (((v >> 16) & 0xff) << 8) | ((v >>> 24) & 0xff);`);
+          lines.push(`  x[${decoded.rd}] = (BigInt(sw(hi) >>> 0) << 32n) | BigInt(sw(lo) >>> 0);`);
+          lines.push(`}`);
+          break;
+        }
+
+        case InstructionType.RBIT: {
+          const bits = decoded.sf === 0 ? 32 : 64;
+          lines.push(`{`);
+          lines.push(`  const val = ${regExpr(decoded.rn)};`);
+          lines.push(`  let r = 0n;`);
+          lines.push(`  for (let b = 0; b < ${bits}; b++) {`);
+          lines.push(`    if ((val & (1n << BigInt(b))) !== 0n) r |= (1n << BigInt(${bits} - 1 - b));`);
+          lines.push(`  }`);
+          lines.push(`  x[${decoded.rd}] = r;`);
+          lines.push(`}`);
+          break;
+        }
+
+        case InstructionType.EXTR: {
+          const bits = decoded.sf === 0 ? 32 : 64;
+          if (decoded.isRegShift) {
+            lines.push(`{`);
+            lines.push(`  const rn = BigInt.asUintN(${bits}, ${regExpr(decoded.rn)});`);
+            lines.push(`  const amt = BigInt(Number(${regExpr(decoded.rm)}) & (${bits} - 1));`);
+            lines.push(`  x[${decoded.rd}] = (rn >> amt) | BigInt.asUintN(${bits}, rn << (BigInt(${bits}) - amt));`);
+            lines.push(`}`);
+          } else {
+            lines.push(`{`);
+            lines.push(`  const rn = BigInt.asUintN(${bits}, ${regExpr(decoded.rn)});`);
+            lines.push(`  const rm = BigInt.asUintN(${bits}, ${regExpr(decoded.rm)});`);
+            lines.push(`  const combined = (rn << BigInt(${bits})) | rm;`);
+            lines.push(`  x[${decoded.rd}] = BigInt.asUintN(${bits}, combined >> ${BigInt(decoded.lsb & (bits - 1))}n);`);
+            lines.push(`}`);
+          }
+          break;
+        }
+
+        case InstructionType.LDXR: {
+          lines.push(`{`);
+          lines.push(`  const addr = Number(${spOrReg(decoded.rn)});`);
+          if (decoded.sf === 1) {
+            lines.push(`  x[${decoded.rt}] = memory.read64(addr);`);
+          } else {
+            lines.push(`  x[${decoded.rt}] = BigInt(memory.read32(addr) >>> 0);`);
+          }
+          lines.push(`}`);
+          break;
+        }
+
+        case InstructionType.STXR: {
+          lines.push(`{`);
+          lines.push(`  const addr = Number(${spOrReg(decoded.rn)});`);
+          if (decoded.sf === 1) {
+            lines.push(`  memory.write64(addr, ${regExpr(decoded.rt)});`);
+          } else {
+            lines.push(`  memory.write32(addr, Number(${regExpr(decoded.rt)} & 0xffffffffn));`);
+          }
+          lines.push(`  x[${decoded.rs}] = 0n;`);
+          lines.push(`}`);
+          break;
+        }
+
         case InstructionType.SVC:
           lines.push(`cpu.pc = 0x${pc.toString(16)}n;`);
           lines.push(`emu.handleSyscall(${decoded.imm16});`);

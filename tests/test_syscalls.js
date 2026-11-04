@@ -405,4 +405,153 @@ console.log("Running Level 1 Linux ARM64 System Call Unit Tests...\n");
   console.log("[PASS] File-backed sys_mmap, BigInt memory reads, shifted logical ops, and 32-bit STP/LDP verified!");
 }
 
+// --- Test 10: Extended Static Libc Linux Syscalls (futex, prlimit64, robust_list, sigaction, gettimeofday, credentials, readv, dup, fallback) ---
+{
+  const emu = new MiniQEMU();
+
+  // 1. sys_set_robust_list (99)
+  emu.cpu.setReg(8, 99n);
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 0n, "sys_set_robust_list must return 0");
+
+  // 2. sys_prlimit64 (261)
+  const limitAddr = 0x00408000;
+  emu.cpu.setReg(8, 261n);
+  emu.cpu.setReg(0, 0n); // pid = 0
+  emu.cpu.setReg(1, 3n); // RLIMIT_STACK
+  emu.cpu.setReg(2, 0n);
+  emu.cpu.setReg(3, BigInt(limitAddr));
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 0n, "sys_prlimit64 must return 0");
+  assert(emu.memory.read64(limitAddr) === 8n * 1024n * 1024n, "rlim_cur must be 8MB");
+
+  // 3. sys_futex (98)
+  const futexAddr = 0x00408100;
+  emu.memory.write32(futexAddr, 42);
+  emu.cpu.setReg(8, 98n);
+  emu.cpu.setReg(0, BigInt(futexAddr));
+  emu.cpu.setReg(1, 0n); // FUTEX_WAIT
+  emu.cpu.setReg(2, 42n); // expected 42
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 0n, "FUTEX_WAIT matching value must succeed (0)");
+
+  // FUTEX_WAIT value mismatch -> -EAGAIN (-11)
+  emu.cpu.setReg(8, 98n);
+  emu.cpu.setReg(0, BigInt(futexAddr));
+  emu.cpu.setReg(1, 0n); // FUTEX_WAIT
+  emu.cpu.setReg(2, 99n); // expected 99, but memory has 42
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === BigInt.asUintN(64, -11n), "FUTEX_WAIT mismatch must return -EAGAIN (-11)");
+
+  // FUTEX_WAKE (1)
+  emu.cpu.setReg(8, 98n);
+  emu.cpu.setReg(0, BigInt(futexAddr));
+  emu.cpu.setReg(1, 1n); // FUTEX_WAKE
+  emu.cpu.setReg(2, 1n);
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 0n, "FUTEX_WAKE must return 0");
+
+  // 4. Signals: sys_rt_sigaction (134), sys_rt_sigprocmask (135), sys_sigaltstack (132)
+  emu.cpu.setReg(8, 134n);
+  emu.cpu.setReg(0, 2n); // SIGINT
+  emu.cpu.setReg(1, 0n);
+  emu.cpu.setReg(2, BigInt(limitAddr));
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 0n, "sys_rt_sigaction must return 0");
+
+  emu.cpu.setReg(8, 135n);
+  emu.cpu.setReg(0, 0n);
+  emu.cpu.setReg(1, 0n);
+  emu.cpu.setReg(2, BigInt(limitAddr));
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 0n, "sys_rt_sigprocmask must return 0");
+
+  emu.cpu.setReg(8, 132n);
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 0n, "sys_sigaltstack must return 0");
+
+  // 5. Credentials: getppid (173), getuid (174), geteuid (175), getgid (176), getegid (177)
+  emu.cpu.setReg(8, 173n); emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 1n, "sys_getppid must return 1");
+  emu.cpu.setReg(8, 174n); emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 1000n, "sys_getuid must return 1000");
+
+  // 6. Time & Memory: sys_gettimeofday (169), sys_madvise (233)
+  const tvAddr = 0x00408200;
+  emu.cpu.setReg(8, 169n);
+  emu.cpu.setReg(0, BigInt(tvAddr));
+  emu.cpu.setReg(1, 0n);
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 0n, "sys_gettimeofday must return 0");
+  assert(emu.memory.read64(tvAddr) > 1700000000n, "sys_gettimeofday must populate valid epoch seconds");
+
+  emu.cpu.setReg(8, 233n); emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 0n, "sys_madvise must return 0");
+
+  // 7. Scatter-gather I/O: sys_readv (65)
+  emu.mountFile("vec_data.txt", "ABCDEF123456");
+  emu.cpu.setReg(8, 56n); // openat
+  const nameAddr = 0x00408300;
+  const nameBytes = new TextEncoder().encode("vec_data.txt\0");
+  for (let i = 0; i < nameBytes.length; i++) emu.memory.write8(nameAddr + i, nameBytes[i]);
+  emu.cpu.setReg(1, BigInt(nameAddr));
+  emu.cpu.setReg(2, 0n); // O_RDONLY
+  emu.handleSyscall();
+  const openedFd = emu.cpu.getReg(0);
+  assert(openedFd >= 3n, "openat should return valid fd");
+
+  // Prepare 2 iovec chunks: 6 bytes to 0x408400, 6 bytes to 0x408500
+  const iovAddr = 0x00408380;
+  emu.memory.write64(iovAddr, 0x00408400n);
+  emu.memory.write64(iovAddr + 8, 6n);
+  emu.memory.write64(iovAddr + 16, 0x00408500n);
+  emu.memory.write64(iovAddr + 24, 6n);
+
+  emu.cpu.setReg(8, 65n); // sys_readv
+  emu.cpu.setReg(0, openedFd);
+  emu.cpu.setReg(1, BigInt(iovAddr));
+  emu.cpu.setReg(2, 2n); // iovcnt = 2
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 12n, `sys_readv must read 12 bytes total, got ${emu.cpu.getReg(0)}`);
+  const chunk1 = emu.readGuestCString(0x00408400, 6);
+  const chunk2 = emu.readGuestCString(0x00408500, 6);
+  assert(chunk1 === "ABCDEF", `chunk1 should be "ABCDEF", got "${chunk1}"`);
+  assert(chunk2 === "123456", `chunk2 should be "123456", got "${chunk2}"`);
+
+  // 8. sys_dup (23) & sys_fcntl (25) & sys_ioctl (29)
+  emu.cpu.setReg(8, 23n);
+  emu.cpu.setReg(0, openedFd);
+  emu.handleSyscall();
+  const dupFd = emu.cpu.getReg(0);
+  assert(dupFd > openedFd, "sys_dup should allocate new fd");
+
+  emu.cpu.setReg(8, 25n); // sys_fcntl F_GETFL
+  emu.cpu.setReg(0, openedFd);
+  emu.cpu.setReg(1, 3n); // F_GETFL
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 0n, "F_GETFL for O_RDONLY should return 0");
+
+  const wsAddr = 0x00408600;
+  emu.cpu.setReg(8, 29n); // sys_ioctl TIOCGWINSZ
+  emu.cpu.setReg(0, 1n); // stdout
+  emu.cpu.setReg(1, 0x5413n);
+  emu.cpu.setReg(2, BigInt(wsAddr));
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 0n, "TIOCGWINSZ must return 0");
+  assert(emu.memory.read16(wsAddr) === 24, "ws_row must be 24");
+  assert(emu.memory.read16(wsAddr + 2) === 80, "ws_col must be 80");
+
+  // 9. Standard Linux -ENOSYS Fallback: sys_statx (291), sys_rseq (293), and unknown syscall 999
+  emu.cpu.setReg(8, 291n); emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === BigInt.asUintN(64, -38n), "sys_statx must return -ENOSYS (-38)");
+
+  emu.cpu.setReg(8, 293n); emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === BigInt.asUintN(64, -38n), "sys_rseq must return -ENOSYS (-38)");
+
+  emu.cpu.setReg(8, 999n); emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === BigInt.asUintN(64, -38n), "Unknown syscall 999 must return -ENOSYS (-38)");
+
+  console.log("[PASS] Extended static libc syscalls (futex, prlimit64, robust_list, readv, signals, dup, ioctl, -ENOSYS fallback) verified!");
+}
+
 console.log("\nAll Level 1 Linux ARM64 System Call Tests Passed Successfully!");

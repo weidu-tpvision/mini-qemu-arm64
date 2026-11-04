@@ -248,4 +248,23 @@ console.log("Running ARM64 Instruction Decoder Extended Unit Tests...\n");
   console.log(`[PASS] Base 11 instructions verified.`);
 }
 
-console.log("\nAll 44 Decoder Unit Tests Passed Successfully!");
+// 8. Static Libc Primitives & Memory Barriers: NOP, DMB, ISB, CLZ, REV/REV16/REV32, RBIT, EXTR, LDXR/STXR
+{
+  assert(Decoder.decode(0xd503201f).type === InstructionType.NOP, "NOP");
+  assert(Decoder.decode(0xd50335bf).type === InstructionType.DMB, "DMB");
+  assert(Decoder.decode(0xd5033fdf).type === InstructionType.ISB, "ISB");
+  assert(Decoder.decode(0xd503203f).type === InstructionType.YIELD, "YIELD");
+  assert(Decoder.decode(0x5ac01001).type === InstructionType.CLZ, "CLZ 32-bit");
+  assert(Decoder.decode(0xdac01043).type === InstructionType.CLZ, "CLZ 64-bit");
+  assert(Decoder.decode(0x5ac00885).type === InstructionType.REV, "REV 32-bit");
+  assert(Decoder.decode(0xdac00cc7).type === InstructionType.REV, "REV 64-bit");
+  assert(Decoder.decode(0x5ac00509).type === InstructionType.REV16, "REV16");
+  assert(Decoder.decode(0xdac0094b).type === InstructionType.REV32, "REV32");
+  assert(Decoder.decode(0x5ac0018d).type === InstructionType.RBIT, "RBIT");
+  assert(Decoder.decode(0x93ce11cf).type === InstructionType.EXTR, "EXTR / ROR");
+  assert(Decoder.decode(0xc85f7fe0).type === InstructionType.LDXR, "LDXR");
+  assert(Decoder.decode(0xc8017fe0).type === InstructionType.STXR, "STXR");
+  console.log(`[PASS] Static Libc & Hardware Barrier instructions (NOP, DMB, ISB, CLZ, REV, EXTR, LDXR, STXR) verified.`);
+}
+
+console.log("\nAll Decoder Unit Tests Passed Successfully!");

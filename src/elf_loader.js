@@ -40,9 +40,26 @@ export class ElfLoader {
     memory.segments = [];
     let loadedSegments = 0;
     let phdrVaddr = 0x00400000n + BigInt(e_phoff);
+    let tlsHeader = null;
+
     for (let i = 0; i < e_phnum; i++) {
       const phOffset = e_phoff + i * e_phentsize;
       const p_type = view.getUint32(phOffset + 0, true);
+
+      // p_type == 6 is PT_PHDR (Program header table itself)
+      if (p_type === 6) {
+        phdrVaddr = view.getBigUint64(phOffset + 16, true);
+      }
+
+      // p_type == 7 is PT_TLS (Thread-Local Storage template)
+      if (p_type === 7) {
+        tlsHeader = {
+          vaddr: view.getBigUint64(phOffset + 16, true),
+          filesz: Number(view.getBigUint64(phOffset + 32, true)),
+          memsz: Number(view.getBigUint64(phOffset + 40, true)),
+          align: Number(view.getBigUint64(phOffset + 48, true))
+        };
+      }
 
       // p_type == 1 is PT_LOAD (Loadable segment)
       if (p_type === 1) {
@@ -95,7 +112,8 @@ export class ElfLoader {
       phoff: e_phoff,
       phentsize: e_phentsize,
       phnum: e_phnum,
-      phdrVaddr
+      phdrVaddr,
+      tlsHeader
     };
     memory.lastWritten.clear();
 

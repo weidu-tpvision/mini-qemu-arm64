@@ -207,4 +207,141 @@ console.log("Running Linux ABI Stack Frame & Compiler Primitives Unit Tests...\n
   console.log("[PASS] Gap A (MSR/MRS tpidr_el0) & Gap B (MADD/MSUB, UBFM/SBFM, Reg-Offset LDR/STR, LDRSW, TBZ/TBNZ) verified!");
 }
 
+// --- Test 6: Multi-Argument argv / envp Stack ABI & Full Auxv Inspection ---
+{
+  const emu = new MiniQEMU();
+  const entryPoint = 0x00401234n;
+  const testArgv = ["my_prog", "--verbose", "-o", "out.bin"];
+  const testEnvp = ["PATH=/usr/bin", "USER=guest"];
+  emu.setupLinuxStack(entryPoint, testArgv, testEnvp);
+
+  const sp = emu.cpu.sp;
+  assert(Number(sp) % 16 === 0, `SP must be 16-byte aligned, got 0x${sp.toString(16)}`);
+
+  // [SP + 0]: argc = 4
+  const argc = emu.memory.read64(Number(sp));
+  assert(argc === 4n, `argc must be 4, got ${argc}`);
+
+  // argv pointers
+  for (let i = 0; i < testArgv.length; i++) {
+    const ptr = Number(emu.memory.read64(Number(sp + BigInt(8 * (i + 1)))));
+    const val = emu.readGuestCString(ptr);
+    assert(val === testArgv[i], `argv[${i}] should be "${testArgv[i]}", got "${val}"`);
+  }
+
+  // argv NULL terminator
+  const argvNull = emu.memory.read64(Number(sp + BigInt(8 * (testArgv.length + 1))));
+  assert(argvNull === 0n, "argv NULL terminator must be 0");
+
+  // envp pointers
+  const envpBaseOffset = 8 * (testArgv.length + 2);
+  for (let i = 0; i < testEnvp.length; i++) {
+    const ptr = Number(emu.memory.read64(Number(sp + BigInt(envpBaseOffset + i * 8))));
+    const val = emu.readGuestCString(ptr);
+    assert(val === testEnvp[i], `envp[${i}] should be "${testEnvp[i]}", got "${val}"`);
+  }
+
+  // envp NULL terminator
+  const envpNull = emu.memory.read64(Number(sp + BigInt(envpBaseOffset + testEnvp.length * 8)));
+  assert(envpNull === 0n, "envp NULL terminator must be 0");
+
+  // Auxv entries
+  const auxvStart = Number(sp) + envpBaseOffset + (testEnvp.length + 1) * 8;
+  const auxv = new Map();
+  for (let offset = auxvStart; offset < auxvStart + 400; offset += 16) {
+    const key = Number(emu.memory.read64(offset));
+    const val = emu.memory.read64(offset + 8);
+    if (key === 0) break;
+    auxv.set(key, val);
+  }
+
+  assert(auxv.get(6) === 4096n, "AT_PAGESZ must be 4096");
+  assert(auxv.get(9) === entryPoint, "AT_ENTRY must match entryPoint");
+  assert(auxv.get(11) === 1000n && auxv.get(12) === 1000n, "AT_UID and AT_EUID must be 1000");
+  assert(auxv.get(16) === 0xffn, "AT_HWCAP must report FP/ASIMD (0xff)");
+  assert(auxv.get(17) === 100n, "AT_CLKTCK must be 100");
+
+  const platStr = emu.readGuestCString(Number(auxv.get(15)));
+  assert(platStr === "aarch64", `AT_PLATFORM must point to "aarch64", got "${platStr}"`);
+
+  const execFnStr = emu.readGuestCString(Number(auxv.get(31)));
+  assert(execFnStr === "my_prog", `AT_EXECFN must point to "my_prog", got "${execFnStr}"`);
+
+  console.log("[PASS] Multi-argument argv/envp and full auxiliary vector (AT_PLATFORM, AT_HWCAP, AT_EXECFN) verified!");
+}
+
+// --- Test 7: Hardware Hints, Memory Barriers & Libc Primitives (Interpreter & JIT) ---
+for (const jitEnabled of [false, true]) {
+  const mode = jitEnabled ? "JIT" : "Interpreter";
+  const emu = new MiniQEMU({ jitEnabled });
+  const spVal = 0x00700000;
+  emu.cpu.sp = BigInt(spVal);
+  emu.memory.write64(spVal, 0x1122334455667788n);
+
+  const instructions = [
+    // 1. System hints & barriers (NOP, DMB, ISB, YIELD)
+    0xd503201f, // nop
+    0xd50335bf, // dmb sy
+    0xd5033fdf, // isb
+    0xd503203f, // yield
+
+    // 2. CLZ w1, w0 (w0 = 16 -> 27 leading zeros)
+    0x52800200, // movz w0, #16
+    0x5ac01001, // clz w1, w0
+
+    // 3. CLZ x3, x2 (x2 = 1 -> 63 leading zeros)
+    0xd2800022, // movz x2, #1
+    0xdac01043, // clz x3, x2
+
+    // 4. REV w5, w4 (w4 = 0x12345678 -> w5 = 0x78563412)
+    0x528acf04, // movz w4, #0x5678
+    0x72a24684, // movk w4, #0x1234, lsl #16
+    0x5ac00885, // rev w5, w4
+
+    // 5. REV x7, x6 (x6 = 0x1122334455667788n -> x7 = 0x8877665544332211n)
+    0xf94003e6, // ldr x6, [sp]
+    0xdac00cc7, // rev x7, x6
+
+    // 6. REV16 w9, w8 (w8 = 0x12345678 -> w9 = 0x34127856)
+    0x2a0403e8, // mov w8, w4
+    0x5ac00509, // rev16 w9, w8
+
+    // 7. REV32 x11, x10 (x10 = 0x1122334455667788n -> x11 = 0x4433221188776655n)
+    0xaa0603ea, // mov x10, x6
+    0xdac0094b, // rev32 x11, x10
+
+    // 8. RBIT w13, w12 (w12 = 1 -> w13 = 0x80000000)
+    0x5280002c, // movz w12, #1
+    0x5ac0018d, // rbit w13, w12
+
+    // 9. ROR x15, x14, #4 (x14 = 0x10 -> x15 = 1)
+    0xd280020e, // movz x14, #16
+    0x93ce11cf, // ror x15, x14, #4
+
+    // 10. LDXR / STXR exclusive atomics
+    0xc85f7fe0, // ldxr x0, [sp] (loads 0x1122334455667788n into x0)
+    0x91000400, // add x0, x0, #1 (0x1122334455667789n)
+    0xc8017fe0, // stxr w1, x0, [sp] (stores to [sp], w1 = 0)
+
+    0xd2800ba8, // movz x8, #93
+    0xd4000001  // svc #0
+  ];
+
+  emu.loadProgram(instructions, 0x00400000);
+  emu.cpu.sp = BigInt(spVal);
+  emu.run(30, false);
+
+  assert(emu.cpu.getReg(1) === 0n, `${mode}: stxr status w1 must be 0 (success)`);
+  assert(emu.cpu.getReg(3) === 63n, `${mode}: clz 64-bit must be 63`);
+  assert(emu.cpu.getReg(5) === 0x78563412n, `${mode}: rev 32-bit expected 0x78563412, got 0x${emu.cpu.getReg(5).toString(16)}`);
+  assert(emu.cpu.getReg(7) === 0x8877665544332211n, `${mode}: rev 64-bit expected 0x8877665544332211, got 0x${emu.cpu.getReg(7).toString(16)}`);
+  assert(emu.cpu.getReg(9) === 0x34127856n, `${mode}: rev16 32-bit expected 0x34127856, got 0x${emu.cpu.getReg(9).toString(16)}`);
+  assert(emu.cpu.getReg(11) === 0x4433221188776655n, `${mode}: rev32 64-bit expected 0x4433221188776655, got 0x${emu.cpu.getReg(11).toString(16)}`);
+  assert(emu.cpu.getReg(13) === 0x80000000n, `${mode}: rbit 32-bit expected 0x80000000, got 0x${emu.cpu.getReg(13).toString(16)}`);
+  assert(emu.cpu.getReg(15) === 1n, `${mode}: ror #4 expected 1, got ${emu.cpu.getReg(15)}`);
+  assert(emu.memory.read64(spVal) === 0x1122334455667789n, `${mode}: memory written by stxr must be updated`);
+
+  console.log(`[PASS] ${mode}: NOP/DMB/ISB/YIELD, CLZ, REV/REV16/REV32, RBIT, EXTR/ROR, LDXR/STXR verified!`);
+}
+
 console.log("\nAll Linux ABI & Compiler Primitive Tests Passed Successfully!");
