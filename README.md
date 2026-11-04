@@ -41,6 +41,13 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
   * **60 FPS Hardware VSync:** Uses Linux `sys_sched_yield` (`syscall 124`) to decouple guest CPU frame rendering from host display synchronization.
   * **Interactive Workbench Display:** Live HTML5 canvas with CRT scanline simulation, instant frame blits, interactive pixel inspector probe, and virtual D-Pad / action button controls.
   * **Bare-metal Demo Binaries:** `bin/graphics_pattern.elf` (SMPTE color bars), `bin/plasma.elf` (76,800-pixel demoscene plasma), and `bin/interactive_paint.elf` (interactive game/canvas painter).
+* **Scalar Floating-Point (VFP) & 128-bit NEON Advanced SIMD:**
+  * **32 128-bit Vector Registers (`V0`–`V31`):** Backed by a unified 512-byte `ArrayBuffer` with zero-copy aliased views for `Q0`–`Q31` (128-bit quadwords), `D0`–`D31` (64-bit IEEE-754 doubles), `S0`–`S31` (32-bit singles), `H0`–`H31` (16-bit halfwords), and `B0`–`B31` (8-bit bytes).
+  * **Scalar VFP & Conversions:** Full support for `FADD`, `FSUB`, `FMUL`, `FDIV`, `FNMUL`, `FNEG`, `FABS`, `FSQRT`, `FMAX`, `FMIN`, `FCMP` (including IEEE-754 `NaN` unordered flags), `SCVTF`, `UCVTF`, saturating `FCVTZS`/`FCVTZU`, `FCVT`, and `FMOV` (register, immediate, and GPR $\leftrightarrow$ FPR bitcasts).
+  * **Packed 128-bit NEON SIMD:** Parallel vector float (`FADD.4S/2D`, `FSUB`, `FMUL`, `FDIV`, `FADDP` pairwise reduction, `FMAX`, `FMIN`, `FNEG`, `FABS`), vector integer (`ADD`, `SUB`, `MUL`, `ADDP`), vector bitwise (`AND`, `ORR`, `EOR`, `MVN`), and lane splat/extract (`DUP`, `INS`, `UMOV`), plus live `FP / NEON (V0–V31)` UI inspection (`bin/neon_matrix.elf`).
+* **Dynamic Heap Allocator & Visual Chunk Map:**
+  * **Page-Granular Reclamation:** Supports heap expansion and contraction via `sys_brk` (`214`) as well as anonymous/file-backed `sys_mmap` (`222`) and `sys_munmap` (`215`) via `memory.freeRange()`.
+  * **Boundary-Tag Allocator & Coalescing:** Bare-metal `malloc`/`free` showcase (`bin/dynamic_memory.elf`) with free-hole reuse and adjacent block coalescing, inspected in real time via the **Heap Allocator** UI tab.
 * **Architectural CPU State:**
   * 31 64-bit general-purpose registers (`X0`–`X30`) using native 64-bit unsigned integers (`BigUint64Array`).
   * Hardwired Zero Register (`XZR` reads 0, discards writes).
@@ -129,43 +136,56 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 
 ```
 ├── src/                           # Core Emulator & Binary Translators
-│   ├── cpu.js                     # 64-bit virtual CPU registers, flags, and snapshots
-│   ├── memory.js                  # 4 KB page-based virtual memory manager & write diff tracker
-│   ├── decoder.js                 # ARM64 bitfield instruction decoder (32+ base instructions)
+│   ├── cpu.js                     # 64-bit GPRs (X0-X30), 128-bit NEON/FP registers (V0-V31), flags & snapshots
+│   ├── memory.js                  # 4 KB page-based virtual memory manager, MMIO VRAM/Input & freeRange()
+│   ├── decoder.js                 # ARM64 bitfield instruction decoder (75+ Integer, System, VFP & NEON instructions)
 │   ├── elf_loader.js              # Universal ELF64 binary parser (Node.js & Browser DataView)
-│   ├── emulator.js                # Core Fetch-Decode-Execute pipeline, hooks & breakpoints
+│   ├── emulator.js                # Core Fetch-Decode-Execute pipeline, VFS, syscalls, hooks & breakpoints
 │   ├── static_recompiler.js       # Approach 1: Binary-to-Source (JS) static AOT recompiler
-│   └── arm2x86.js                 # Approach 2: Direct Binary-to-Assembly (x86-64) translator
+│   └── arm2x86.js                 # Approach 2: Direct Binary-to-Assembly (x86-64 / SSE) translator
 ├── ui/                            # Interactive Web Visual Debugger & AOT Workbench
 │   ├── index.html                 # Multi-panel dashboard layout with import map
 │   ├── style.css                  # Clean modern dark-mode theme & animations
-│   ├── app.js                     # Browser debugger, pipeline inspector & AOT benchmark runner
+│   ├── app.js                     # Browser debugger, NEON/Heap/VRAM inspectors & AOT benchmark runner
 │   └── fs_shim.js                 # Browser module shim for zero-build execution
-├── tests/                         # Automated Test Suite
-│   ├── test_decoder.js            # 23+ unit tests for instruction decoding, shifts, and math
+├── tests/                         # Automated Test Suite (9 Suites)
+│   ├── test_decoder.js            # Unit tests for instruction decoding, shifts, bitfields, and math
 │   ├── test_ui_api.js             # Unit tests for UI hooks, breakpoints, memory diffs & reset
 │   ├── test_server.js             # Integration tests for HTTP dev server & binary streaming
-│   ├── test_syscalls.js           # Unit tests for sys_brk, sys_mmap, sys_read, sys_clock_gettime
-│   └── test_abi_and_compiler.js   # Unit tests for Linux ABI stack frame, ADRP, CSEL, and CSET
+│   ├── test_syscalls.js           # Unit tests for VFS, sys_brk, sys_mmap, sys_read, sys_clock_gettime
+│   ├── test_abi_and_compiler.js   # Unit tests for Linux ABI stack frame, ADRP, CSEL, and CSET
+│   ├── test_graphics.js           # Unit tests for Level 1 MMIO VRAM framebuffer & demo binaries
+│   ├── test_interactive.js        # Unit tests for MMIO keyboard/pointer input & 60 FPS VSync yield
+│   ├── test_dynamic_memory.js     # Unit tests for sys_brk contraction, sys_munmap & heap chunk coalescing
+│   └── test_neon_fp.js            # Unit tests for Scalar VFP, 128-bit NEON SIMD, saturation & translators
 ├── tools/                         # Server, Preview Generator & ELF64 Binary Builders
 │   ├── server.js                  # Zero-dependency Node HTTP dev server (`npm run ui`)
 │   ├── generate_ui_preview.js     # Generates docs/ui_preview.svg and docs/ui_preview.png
-│   ├── elf_builder.js             # Generates standards-compliant bin/fib.elf (iterative)
+│   ├── elf_builder.js             # Generates bin/fib.elf (iterative)
 │   ├── build_fib_rec_elf.js       # Generates bin/fib_rec.elf (recursive fib(10) with stack frames)
 │   ├── build_hello_elf.js         # Generates bin/hello.elf with embedded string and load/stores
 │   ├── build_math_elf.js          # Generates bin/math_func.elf with BL, STP, LDP, MUL, UDIV
-│   └── build_heap_demo_elf.js     # Generates bin/heap_demo.elf (dynamic heap allocation via sys_brk)
+│   ├── build_heap_demo_elf.js     # Generates bin/heap_demo.elf (bump heap allocation via sys_brk)
+│   ├── build_graphics_elf.js      # Generates bin/graphics_pattern.elf and bin/plasma.elf
+│   ├── build_interactive_elf.js   # Generates bin/interactive_paint.elf (interactive gamepad/mouse painter)
+│   ├── build_dynamic_memory_elf.js# Generates bin/dynamic_memory.elf (boundary-tag malloc/free & coalescing)
+│   └── build_neon_matrix_elf.js   # Generates bin/neon_matrix.elf (3D VFP hypotenuse & NEON 4S dot product)
 ├── guest/                         # Freestanding C++ Guest Source Code
 │   ├── fib.cpp                    # Iterative Fibonacci source code
 │   ├── fib_rec.cpp                # Recursive Fibonacci source code
 │   ├── hello.cpp                  # String I/O source code
 │   └── heap_demo.cpp              # Dynamic heap allocation source code
-├── bin/                           # Compiled 64-bit ARM ELF Executables
+├── bin/                           # Compiled 64-bit ARM ELF Executables (10 Binaries)
 │   ├── fib.elf                    # Iterative Fibonacci(10) = 55
 │   ├── fib_rec.elf                # Recursive Fibonacci(10) = 55
 │   ├── hello.elf                  # String I/O via Linux sys_write
 │   ├── math_func.elf              # Subroutine calls, stack frames & integer math
-│   └── heap_demo.elf              # Dynamic heap allocation & sum verification
+│   ├── heap_demo.elf              # Dynamic heap allocation & sum verification
+│   ├── graphics_pattern.elf       # Level 1 MMIO SMPTE color bars & RGB gradients
+│   ├── plasma.elf                 # Level 1 MMIO 320x240 procedural demoscene plasma
+│   ├── interactive_paint.elf      # Interactive MMIO gamepad/mouse canvas painter
+│   ├── dynamic_memory.elf         # Boundary-tag allocator (malloc, free, reuse & coalescing)
+│   └── neon_matrix.elf            # Scalar VFP 3D magnitude & 128-bit NEON 4xFloat32 dot product
 ├── out/                           # Generated AOT & Binary Translator Outputs
 │   ├── fib_recompiled.js          # Lifted JavaScript module from static_recompiler.js
 │   ├── fib_translated.asm         # Translated x86-64 NASM/Intel assembly (fib.elf)
@@ -239,7 +259,7 @@ npm start
 # or: node src/emulator.js bin/fib.elf
 ```
 
-### 5. Run Function Calls, Stack Frames & Math Program
+### 6. Run Function Calls, Stack Frames & Math Program
 Executes [bin/math_func.elf](bin/math_func.elf), testing C++ subroutine calls (`BL`), stack saving/restoring (`STP`/`LDP`), math (`MUL`, `UDIV`), and bitwise XOR (`EOR`):
 ```bash
 node src/emulator.js bin/math_func.elf
@@ -260,7 +280,7 @@ Program terminated cleanly via Linux sys_exit (syscall 93).
 >>> Exit Code (Result in X0): 52 <<<
 ```
 
-### 6. Run Recursive Fibonacci with Pre/Post-Indexed Stack Frames
+### 7. Run Recursive Fibonacci with Pre/Post-Indexed Stack Frames
 Executes [bin/fib_rec.elf](bin/fib_rec.elf), computing $\text{fib}(10) = 55$ across **177 recursive `BL`/`RET` calls** (1,503 instruction cycles) using `stp x29, x30, [sp, #-32]!` and `ldp x29, x30, [sp], #32`:
 ```bash
 node src/emulator.js bin/fib_rec.elf --quiet
@@ -270,7 +290,7 @@ node src/emulator.js bin/fib_rec.elf --quiet
 [Mini-QEMU] Completed "bin/fib_rec.elf" in 1503 cycles -> Exit Code (X0): 55
 ```
 
-### 7. Run the String I/O & Memory Program
+### 8. Run the String I/O & Memory Program
 Executes [bin/hello.elf](bin/hello.elf), testing `STR`, `LDR`, `ADR`, and printing to the console via Linux `sys_write`:
 ```bash
 node src/emulator.js bin/hello.elf
@@ -286,7 +306,7 @@ Program terminated cleanly via Linux sys_exit (syscall 93).
 >>> Exit Code (Result in X0): 0 <<<
 ```
 
-### 8. Run the Static AOT Recompiler & Benchmark (Approach 1)
+### 9. Run the Static AOT Recompiler & Benchmark (Approach 1)
 Statically lifts `bin/fib.elf` into structured JavaScript (`runNative` in [out/fib_recompiled.js](out/fib_recompiled.js)) and benchmarks 10,000 iterations:
 ```bash
 npm run recompile
@@ -300,7 +320,7 @@ Static Recompiled Result: 55 in 6.99 ms
 Speedup Factor          : 19.0x FASTER with Static AOT!
 ```
 
-### 9. Run the ARM64-to-x86 Static Binary Translator (Approach 2)
+### 10. Run the ARM64-to-x86 Static Binary Translator (Approach 2)
 Directly translates an ARM64 ELF binary (`bin/fib.elf`, `bin/math_func.elf`, or `bin/fib_rec.elf`) into **native x86-64 Intel/NASM Assembly** and **raw x86 machine bytes** in `out/`:
 ```bash
 npm run translate

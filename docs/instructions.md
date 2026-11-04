@@ -96,8 +96,8 @@ Mini-QEMU models 31 64-bit general-purpose registers (`X0`–`X30`), aliased to 
 | `MUL` | `mul Xd, Xn, Xm` | 32-bit or 64-bit integer multiply | `sf 00 11011 000 Rm 0 11111 Rn Rd` | None | `cpu.setReg(d, rn * rm)` | `imul r64, r64` |
 | `MADD` | `madd Xd, Xn, Xm, Xa` | Multiply-Add: $X_d = X_a + (X_n \times X_m)$ | `sf 00 11011 000 Rm 0 Ra Rn Rd` | None | `cpu.setReg(d, ra + rn * rm)` | `imul` + `add` |
 | `MSUB` | `msub Xd, Xn, Xm, Xa` | Multiply-Subtract: $X_d = X_a - (X_n \times X_m)$ | `sf 00 11011 000 Rm 1 Ra Rn Rd` | None | `cpu.setReg(d, ra - rn * rm)` | `imul` + `sub` |
-| `SDIV` | `sdiv Xd, Xn, Xm` | Signed integer division (truncates towards 0; div-by-0 returns 0) | `sf 00 11010110 Rm 000010 Rn Rd` | None | `cpu.setReg(d, rm === 0 ? 0 : s_rn / s_rm)` | `cqo; idiv r64` |
-| `UDIV` | `udiv Xd, Xn, Xm` | Unsigned integer division (div-by-0 returns 0) | `sf 00 11010110 Rm 000011 Rn Rd` | None | `cpu.setReg(d, rm === 0 ? 0 : rn / rm)` | `xor rdx,rdx; div r64`|
+| `SDIV` | `sdiv Xd, Xn, Xm` | Signed integer division (truncates towards 0; div-by-0 returns 0) | `sf 00 11010110 Rm 000011 Rn Rd` | None | `cpu.setReg(d, rm === 0 ? 0 : s_rn / s_rm)` | `cqo; idiv r64` |
+| `UDIV` | `udiv Xd, Xn, Xm` | Unsigned integer division (div-by-0 returns 0) | `sf 00 11010110 Rm 000010 Rn Rd` | None | `cpu.setReg(d, rm === 0 ? 0 : rn / rm)` | `xor rdx,rdx; div r64`|
 
 ---
 
@@ -322,14 +322,14 @@ The modular bitfield decoder in [`src/decoder.js`](file:///C:/Users/wei.du/WorkA
 1. **`op0 & 0b1110 === 0b1000`:** Data Processing — Immediate (`MOVZ`, `MOVN`, `MOVK`, `ADD_IMM`, `SUB_IMM`, `SUBS_IMM`, `ADR`, `ADRP`).
 2. **`op0 & 0b1110 === 0b1010`:** Branches, Exception Generation & System (`B`, `B.cond`, `CBZ`, `CBNZ`, `TBZ`, `TBNZ`, `BL`, `BR`, `BLR`, `RET`, `SVC`, `MRS`, `MSR`).
 3. **`op0 & 0b0101 === 0b0100`:** Loads and Stores (`LDR`, `STR`, `LDP`, `STP`, scalar FP loads/stores, vector loads/stores).
-4. **`op0 & 0b0111 === 0b0110`:** Data Processing — Register (`ADD_REG`, `SUB_REG`, `SUBS_REG`, `AND_REG`, `ORR_REG`, `EOR_REG`, `MVN_REG`, `MUL`, `MADD`, `MSUB`, `SDIV`, `UDIV`, `CSEL`, `CSINC`, `CSINV`, `CSNEG`).
+4. **`op0 & 0b0111 === 0b0101`:** Data Processing — Register (`ADD_REG`, `SUB_REG`, `SUBS_REG`, `AND_REG`, `ORR_REG`, `EOR_REG`, `MVN_REG`, `MUL`, `MADD`, `MSUB`, `SDIV`, `UDIV`, `CSEL`, `CSINC`, `CSINV`, `CSNEG`).
 5. **`op0 & 0b0111 === 0b0111`:** Floating-Point & Advanced SIMD:
    - Scalar FP 2-source (`FADD`, `FSUB`, `FMUL`, `FDIV`, `FNMUL`, `FMAX`, `FMIN`).
    - Scalar FP 1-source (`FABS`, `FNEG`, `FSQRT`, `FCVT`).
    - Scalar FP Comparisons (`FCMP`) & Conversions (`SCVTF`, `UCVTF`, `FCVTZS`, `FCVTZU`).
-   - NEON Vector Arithmetic (`FADD_VEC`, `FSUB_VEC`, `FMUL_VEC`, `FDIV_VEC`, `FADDP_VEC`, `ADD_VEC`, `SUB_VEC`, `MUL_VEC`, `ADDP_VEC`).
+   - NEON Vector Arithmetic (`FADD_VEC`, `FSUB_VEC`, `FMUL_VEC`, `FDIV_VEC`, `FADDP_VEC`, `FMAX_VEC`, `FMIN_VEC`, `FNEG_VEC`, `FABS_VEC`, `ADD_VEC`, `SUB_VEC`, `MUL_VEC`, `ADDP_VEC`).
    - NEON Vector Bitwise Logic (`AND_VEC`, `ORR_VEC`, `EOR_VEC`, `NOT_VEC`).
-   - NEON Vector Structural & Splat (`DUP_ELEM`, `DUP_GEN`, `INS_GEN`, `UMOV_ELEM`).
+   - NEON Vector Structural & Splat (`DUP_ELEM`, `DUP_GEN`, `INS_GEN`, `INS_ELEM`, `UMOV_ELEM`).
 
 ---
 

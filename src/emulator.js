@@ -1,4 +1,4 @@
-// emulator.js - Mini-QEMU ARM64 User-Space Emulator (32+ Core Instructions)
+// emulator.js - Mini-QEMU ARM64 User-Space Emulator (75+ Integer, System, VFP Float & NEON SIMD Instructions)
 import {
   Memory,
   VRAM_BASE, FB_WIDTH, FB_HEIGHT, FB_BPP, FB_SIZE, VRAM_END,
@@ -535,7 +535,9 @@ export class MiniQEMU {
 
       case InstructionType.AND_REG: {
         const bits = decoded.sf === 0 ? 32 : 64;
-        const res = BigInt.asUintN(bits, this.cpu.getReg(decoded.rn) & this.cpu.getReg(decoded.rm));
+        const op1 = BigInt.asUintN(bits, this.cpu.getReg(decoded.rn));
+        const op2 = this.applyShift(this.cpu.getReg(decoded.rm), decoded.shift, decoded.imm6, decoded.sf);
+        const res = BigInt.asUintN(bits, op1 & op2);
         this.cpu.setReg(decoded.rd, res);
         this.cpu.pc += 4n;
         break;
@@ -543,7 +545,9 @@ export class MiniQEMU {
 
       case InstructionType.ORR_REG: {
         const bits = decoded.sf === 0 ? 32 : 64;
-        const res = BigInt.asUintN(bits, this.cpu.getReg(decoded.rn) | this.cpu.getReg(decoded.rm));
+        const op1 = BigInt.asUintN(bits, this.cpu.getReg(decoded.rn));
+        const op2 = this.applyShift(this.cpu.getReg(decoded.rm), decoded.shift, decoded.imm6, decoded.sf);
+        const res = BigInt.asUintN(bits, op1 | op2);
         this.cpu.setReg(decoded.rd, res);
         this.cpu.pc += 4n;
         break;
@@ -551,7 +555,9 @@ export class MiniQEMU {
 
       case InstructionType.EOR_REG: {
         const bits = decoded.sf === 0 ? 32 : 64;
-        const res = BigInt.asUintN(bits, this.cpu.getReg(decoded.rn) ^ this.cpu.getReg(decoded.rm));
+        const op1 = BigInt.asUintN(bits, this.cpu.getReg(decoded.rn));
+        const op2 = this.applyShift(this.cpu.getReg(decoded.rm), decoded.shift, decoded.imm6, decoded.sf);
+        const res = BigInt.asUintN(bits, op1 ^ op2);
         this.cpu.setReg(decoded.rd, res);
         this.cpu.pc += 4n;
         break;
@@ -559,7 +565,8 @@ export class MiniQEMU {
 
       case InstructionType.MVN_REG: {
         const bits = decoded.sf === 0 ? 32 : 64;
-        const res = BigInt.asUintN(bits, ~this.cpu.getReg(decoded.rm));
+        const op2 = this.applyShift(this.cpu.getReg(decoded.rm), decoded.shift, decoded.imm6, decoded.sf);
+        const res = BigInt.asUintN(bits, ~op2);
         this.cpu.setReg(decoded.rd, res);
         this.cpu.pc += 4n;
         break;
@@ -824,8 +831,13 @@ export class MiniQEMU {
       case InstructionType.STP: {
         const baseAddr = Number(this.cpu.getSPOrReg(decoded.rn));
         const targetAddr = decoded.postIndex ? baseAddr : (baseAddr + decoded.offsetBytes);
-        this.memory.write64(targetAddr, this.cpu.getReg(decoded.rt1));
-        this.memory.write64(targetAddr + 8, this.cpu.getReg(decoded.rt2));
+        if (decoded.sf === 0) {
+          this.memory.write32(targetAddr, Number(this.cpu.getReg(decoded.rt1) & 0xffffffffn));
+          this.memory.write32(targetAddr + 4, Number(this.cpu.getReg(decoded.rt2) & 0xffffffffn));
+        } else {
+          this.memory.write64(targetAddr, this.cpu.getReg(decoded.rt1));
+          this.memory.write64(targetAddr + 8, this.cpu.getReg(decoded.rt2));
+        }
         if (decoded.preIndex || decoded.postIndex) {
           this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
         }
@@ -836,8 +848,13 @@ export class MiniQEMU {
       case InstructionType.LDP: {
         const baseAddr = Number(this.cpu.getSPOrReg(decoded.rn));
         const targetAddr = decoded.postIndex ? baseAddr : (baseAddr + decoded.offsetBytes);
-        this.cpu.setReg(decoded.rt1, this.memory.read64(targetAddr));
-        this.cpu.setReg(decoded.rt2, this.memory.read64(targetAddr + 8));
+        if (decoded.sf === 0) {
+          this.cpu.setReg(decoded.rt1, BigInt(this.memory.read32(targetAddr)));
+          this.cpu.setReg(decoded.rt2, BigInt(this.memory.read32(targetAddr + 4)));
+        } else {
+          this.cpu.setReg(decoded.rt1, this.memory.read64(targetAddr));
+          this.cpu.setReg(decoded.rt2, this.memory.read64(targetAddr + 8));
+        }
         if (decoded.preIndex || decoded.postIndex) {
           this.cpu.setSPOrReg(decoded.rn, BigInt(baseAddr + decoded.offsetBytes));
         }
@@ -1118,7 +1135,7 @@ export class MiniQEMU {
           const len = this.cpu.getReg(1);
           const prot = Number(this.cpu.getReg(2));
           const flags = Number(this.cpu.getReg(3));
-          const fd = Number(this.cpu.getReg(4));
+          const fd = Number(BigInt.asIntN(32, this.cpu.getReg(4)));
           const offset = Number(this.cpu.getReg(5));
           // Allocate page-aligned chunk from mmap space
           const alignedLen = (len + 4095n) & ~4095n;
@@ -1127,8 +1144,18 @@ export class MiniQEMU {
             allocAddr = this.mmapCurrent;
             this.mmapCurrent += alignedLen;
           }
-          this.mmapRegions.set(Number(allocAddr), {
-            addr: Number(allocAddr),
+          const numAllocAddr = Number(allocAddr);
+          // Populate mapped pages if file-backed (fd >= 0 in VFS table)
+          if (fd >= 0 && this.fds.has(fd)) {
+            const desc = this.fds.get(fd);
+            const avail = Math.max(0, desc.data.length - offset);
+            const copyLen = Math.min(Number(len), avail);
+            for (let i = 0; i < copyLen; i++) {
+              this.memory.write8(numAllocAddr + i, desc.data[offset + i]);
+            }
+          }
+          this.mmapRegions.set(numAllocAddr, {
+            addr: numAllocAddr,
             len: Number(alignedLen),
             prot,
             flags,
@@ -1139,8 +1166,22 @@ export class MiniQEMU {
         } else if (syscallNum === 215) { // sys_munmap(addr, length)
           const addr = Number(this.cpu.getReg(0));
           const len = Number(this.cpu.getReg(1));
-          this.memory.freeRange(addr, len);
-          this.mmapRegions.delete(addr);
+          const alignedLen = (len + 4095) & ~4095;
+          this.memory.freeRange(addr, alignedLen);
+          if (this.mmapRegions.has(addr)) {
+            const region = this.mmapRegions.get(addr);
+            if (alignedLen >= region.len) {
+              this.mmapRegions.delete(addr);
+            } else {
+              // Shrink region if only the leading portion was unmapped
+              this.mmapRegions.delete(addr);
+              this.mmapRegions.set(addr + alignedLen, {
+                ...region,
+                addr: addr + alignedLen,
+                len: region.len - alignedLen
+              });
+            }
+          }
           this.cpu.setReg(0, 0n);
         } else if (syscallNum === 226) { // sys_mprotect
           this.cpu.setReg(0, 0n);

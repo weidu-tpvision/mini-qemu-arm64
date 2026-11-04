@@ -1,4 +1,4 @@
-// decoder.js - ARM64 (AArch64) Instruction Decoder (~32 Base Integer Instructions)
+// decoder.js - ARM64 (AArch64) Instruction Decoder (75+ Integer, System, VFP Float & NEON SIMD Instructions)
 // Converts raw 32-bit integers into structured instruction representations.
 
 export const InstructionType = {
@@ -664,6 +664,7 @@ export class Decoder {
         rn,
         rm,
         cond,
+        condName,
         op2,
         disassembly: disasm,
       };
@@ -677,6 +678,8 @@ export class Decoder {
       const rn = (raw >>> 5) & 0x1f;
       const rd = raw & 0x1f;
       const regPrefix = sf ? "x" : "w";
+      const shiftName = shift === 0b01 ? "lsr" : shift === 0b10 ? "asr" : "lsl";
+      const shiftSuffix = imm6 > 0 ? `, ${shiftName} #${imm6}` : "";
 
       if (op === 0 && s === 0) {
         return {
@@ -688,7 +691,7 @@ export class Decoder {
           rm,
           shift,
           imm6,
-          disassembly: `add ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}${imm6 > 0 ? `, lsl #${imm6}` : ""}`,
+          disassembly: `add ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}${shiftSuffix}`,
         };
       } else if (op === 1 && s === 0) {
         return {
@@ -700,13 +703,13 @@ export class Decoder {
           rm,
           shift,
           imm6,
-          disassembly: `sub ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}${imm6 > 0 ? `, lsl #${imm6}` : ""}`,
+          disassembly: `sub ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}${shiftSuffix}`,
         };
       } else if (op === 1 && s === 1) { // SUBS / CMP register
         const mnemonic = (rd === 31) ? "cmp" : "subs";
         const disasm = (rd === 31)
-          ? `cmp ${regPrefix}${rn}, ${regPrefix}${rm}${imm6 > 0 ? `, lsl #${imm6}` : ""}`
-          : `subs ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}${imm6 > 0 ? `, lsl #${imm6}` : ""}`;
+          ? `cmp ${regPrefix}${rn}, ${regPrefix}${rm}${shiftSuffix}`
+          : `subs ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}${shiftSuffix}`;
         return {
           type: InstructionType.SUBS_REG,
           raw,
@@ -723,21 +726,24 @@ export class Decoder {
 
     // Logical (shifted register): bits [28:24] = 01010
     if (((raw >>> 24) & 0b11111) === 0b01010) {
+      const shift = (raw >>> 22) & 0b11;
       const rm = (raw >>> 16) & 0x1f;
       const imm6 = (raw >>> 10) & 0x3f;
       const rn = (raw >>> 5) & 0x1f;
       const rd = raw & 0x1f;
       const nBit = (raw >>> 21) & 1; // 1 for NOT (ORN, EON, BIC)
       const regPrefix = sf ? "x" : "w";
+      const shiftName = shift === 0b01 ? "lsr" : shift === 0b10 ? "asr" : "lsl";
+      const shiftSuffix = imm6 > 0 ? `, ${shiftName} #${imm6}` : "";
 
       // AND: op == 0, s == 0, N == 0
       if (op === 0 && s === 0 && nBit === 0) {
-        return { type: InstructionType.AND_REG, raw, sf, rd, rn, rm, disassembly: `and ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
+        return { type: InstructionType.AND_REG, raw, sf, rd, rn, rm, shift, imm6, disassembly: `and ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}${shiftSuffix}` };
       }
 
       // ORR / MOV: op == 0, s == 1, N == 0
       if (op === 0 && s === 1 && nBit === 0) {
-        const isMov = (rn === 31);
+        const isMov = (rn === 31 && imm6 === 0 && shift === 0);
         return {
           type: InstructionType.ORR_REG,
           raw,
@@ -745,18 +751,20 @@ export class Decoder {
           rd,
           rn,
           rm,
-          disassembly: isMov ? `mov ${regPrefix}${rd}, ${regPrefix}${rm}` : `orr ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}`,
+          shift,
+          imm6,
+          disassembly: isMov ? `mov ${regPrefix}${rd}, ${regPrefix}${rm}` : `orr ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}${shiftSuffix}`,
         };
       }
 
       // MVN (ORN xd, xzr, xm): op == 0, s == 1, N == 1
       if (op === 0 && s === 1 && nBit === 1 && rn === 31) {
-        return { type: InstructionType.MVN_REG, raw, sf, rd, rm, disassembly: `mvn ${regPrefix}${rd}, ${regPrefix}${rm}` };
+        return { type: InstructionType.MVN_REG, raw, sf, rd, rm, shift, imm6, disassembly: `mvn ${regPrefix}${rd}, ${regPrefix}${rm}${shiftSuffix}` };
       }
 
       // EOR (XOR): op == 1, s == 0, N == 0
       if (op === 1 && s === 0 && nBit === 0) {
-        return { type: InstructionType.EOR_REG, raw, sf, rd, rn, rm, disassembly: `eor ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
+        return { type: InstructionType.EOR_REG, raw, sf, rd, rn, rm, shift, imm6, disassembly: `eor ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}${shiftSuffix}` };
       }
     }
 
@@ -775,7 +783,8 @@ export class Decoder {
       const lBit = (raw >>> 22) & 1; // 0 = Store (STP), 1 = Load (LDP)
       let imm7 = (raw >>> 15) & 0x7f;
       if (imm7 & 0x40) imm7 -= 0x80; // sign extend 7 bits
-      const scale = isVec ? (opc === 0b10 ? 16 : opc === 0b01 ? 8 : 4) : 8;
+      const sf = (opc >>> 1) & 1; // For GPR STP/LDP: opc=00 is 32-bit (w), opc=10 is 64-bit (x)
+      const scale = isVec ? (opc === 0b10 ? 16 : opc === 0b01 ? 8 : 4) : (sf ? 8 : 4);
       const offsetBytes = imm7 * scale;
       const rt2 = (raw >>> 10) & 0x1f;
       const rn = (raw >>> 5) & 0x1f;
@@ -819,18 +828,20 @@ export class Decoder {
 
       const type = (lBit === 1) ? InstructionType.LDP : InstructionType.STP;
       const mnem = (lBit === 1) ? "ldp" : "stp";
+      const gprPrefix = sf ? "x" : "w";
 
       return {
         type,
         raw,
         opc,
+        sf,
         rt1,
         rt2,
         rn,
         offsetBytes,
         preIndex,
         postIndex,
-        disassembly: `${mnem} x${rt1}, x${rt2}, ${addrStr}`,
+        disassembly: `${mnem} ${gprPrefix}${rt1}, ${gprPrefix}${rt2}, ${addrStr}`,
       };
     }
 

@@ -150,7 +150,28 @@ console.log("Running ARM64 Instruction Decoder Extended Unit Tests...\n");
   const d = Decoder.decode(0x9a820020); // csel x0, x1, x2, eq
   assert(d.type === InstructionType.CSEL, "Type must be CSEL");
   assert(d.rd === 0 && d.rn === 1 && d.rm === 2, "Registers must match");
-  console.log(`[PASS] CSEL test: ${d.disassembly}`);
+  assert(d.condName === "eq", `CSEL must include condName="eq", got "${d.condName}"`);
+  console.log(`[PASS] CSEL test (with condName): ${d.disassembly}`);
+}
+{
+  // Shifted ADD_REG (lsr #3) and shifted ORR_REG (lsl #2)
+  const dAddLsr = Decoder.decode(0x8b420c20); // add x0, x1, x2, lsr #3
+  assert(dAddLsr.type === InstructionType.ADD_REG && dAddLsr.shift === 1 && dAddLsr.imm6 === 3, "Shifted ADD_REG fields");
+  assert(dAddLsr.disassembly === "add x0, x1, x2, lsr #3", `Expected "add x0, x1, x2, lsr #3", got "${dAddLsr.disassembly}"`);
+
+  const dOrrLsl = Decoder.decode(0xaa020820); // orr x0, x1, x2, lsl #2
+  assert(dOrrLsl.type === InstructionType.ORR_REG && dOrrLsl.shift === 0 && dOrrLsl.imm6 === 2, "Shifted ORR_REG fields");
+  assert(dOrrLsl.disassembly === "orr x0, x1, x2, lsl #2", `Expected "orr x0, x1, x2, lsl #2", got "${dOrrLsl.disassembly}"`);
+
+  // 32-bit STP / LDP (opc=00 -> w registers, scale=4)
+  const dStpW = Decoder.decode(0x29010be1); // stp w1, w2, [sp, #8] (imm7=2 * 4 = 8)
+  assert(dStpW.type === InstructionType.STP && dStpW.sf === 0 && dStpW.offsetBytes === 8, "32-bit STP fields");
+  assert(dStpW.disassembly === "stp w1, w2, [sp, #8]", `Expected "stp w1, w2, [sp, #8]", got "${dStpW.disassembly}"`);
+
+  const dLdpW = Decoder.decode(0x29410be1); // ldp w1, w2, [sp, #8] (imm7=2 * 4 = 8)
+  assert(dLdpW.type === InstructionType.LDP && dLdpW.sf === 0 && dLdpW.offsetBytes === 8, "32-bit LDP fields");
+  assert(dLdpW.disassembly === "ldp w1, w2, [sp, #8]", `Expected "ldp w1, w2, [sp, #8]", got "${dLdpW.disassembly}"`);
+  console.log(`[PASS] Shifted ADD/ORR & 32-bit STP/LDP decoding verified.`);
 }
 {
   const d = Decoder.decode(0x9a9f17e0); // cset x0, eq (csinc x0, xzr, xzr, ne)

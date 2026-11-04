@@ -66,7 +66,29 @@ export class StaticRecompiler {
     lines.push("  const vBytes = new Uint8Array(vBuffer);");
     lines.push("  let flagZ = false;");
     lines.push("  let flagN = false;");
+    lines.push("  let flagC = false;");
+    lines.push("  let flagV = false;");
     lines.push("");
+
+    const condToJs = (cond) => {
+      switch (cond) {
+        case ConditionCode.EQ: return "flagZ";
+        case ConditionCode.NE: return "!flagZ";
+        case ConditionCode.CS: return "flagC";
+        case ConditionCode.CC: return "!flagC";
+        case ConditionCode.MI: return "flagN";
+        case ConditionCode.PL: return "!flagN";
+        case ConditionCode.VS: return "flagV";
+        case ConditionCode.VC: return "!flagV";
+        case ConditionCode.HI: return "(flagC && !flagZ)";
+        case ConditionCode.LS: return "(!flagC || flagZ)";
+        case ConditionCode.GE: return "(flagN === flagV)";
+        case ConditionCode.LT: return "(flagN !== flagV)";
+        case ConditionCode.GT: return "(!flagZ && (flagN === flagV))";
+        case ConditionCode.LE: return "(flagZ || (flagN !== flagV))";
+        default: return "true";
+      }
+    };
 
     // Identify branch targets (labels) and backward loop ranges (targetPC -> count)
     const loopStarts = new Map();
@@ -224,19 +246,25 @@ export class StaticRecompiler {
 
         case InstructionType.SUBS_IMM:
           lines.push(`${indent}{`);
-          lines.push(`${indent}  const res = BigInt.asUintN(64, ${spOrReg(decoded.rn)} - ${decoded.immValue}n);`);
+          lines.push(`${indent}  const op1 = ${spOrReg(decoded.rn)}, op2 = ${decoded.immValue}n;`);
+          lines.push(`${indent}  const res = BigInt.asUintN(64, op1 - op2);`);
           if (decoded.rd !== 31) lines.push(`${indent}  x[${decoded.rd}] = res;`);
           lines.push(`${indent}  flagZ = (res === 0n);`);
           lines.push(`${indent}  flagN = ((res & (1n << 63n)) !== 0n);`);
+          lines.push(`${indent}  flagC = (op1 >= op2);`);
+          lines.push(`${indent}  flagV = (((BigInt.asIntN(64, op1) ^ BigInt.asIntN(64, op2)) < 0n) && ((BigInt.asIntN(64, op1) ^ BigInt.asIntN(64, res)) < 0n));`);
           lines.push(`${indent}} // ${decoded.disassembly}`);
           break;
 
         case InstructionType.SUBS_REG:
           lines.push(`${indent}{`);
-          lines.push(`${indent}  const res = BigInt.asUintN(64, ${regExpr(decoded.rn)} - ${regExpr(decoded.rm)});`);
+          lines.push(`${indent}  const op1 = ${regExpr(decoded.rn)}, op2 = ${regExpr(decoded.rm)};`);
+          lines.push(`${indent}  const res = BigInt.asUintN(64, op1 - op2);`);
           if (decoded.rd !== 31) lines.push(`${indent}  x[${decoded.rd}] = res;`);
           lines.push(`${indent}  flagZ = (res === 0n);`);
           lines.push(`${indent}  flagN = ((res & (1n << 63n)) !== 0n);`);
+          lines.push(`${indent}  flagC = (op1 >= op2);`);
+          lines.push(`${indent}  flagV = (((BigInt.asIntN(64, op1) ^ BigInt.asIntN(64, op2)) < 0n) && ((BigInt.asIntN(64, op1) ^ BigInt.asIntN(64, res)) < 0n));`);
           lines.push(`${indent}} // ${decoded.disassembly}`);
           break;
 
@@ -292,14 +320,26 @@ export class StaticRecompiler {
           break;
 
         case InstructionType.CSEL: {
-          const condExpr = decoded.cond === ConditionCode.EQ ? "flagZ" : "!flagZ";
+          const condExpr = condToJs(decoded.cond);
           lines.push(`${indent}x[${decoded.rd}] = (${condExpr}) ? ${regExpr(decoded.rn)} : ${regExpr(decoded.rm)}; // ${decoded.disassembly}`);
           break;
         }
 
         case InstructionType.CSINC: {
-          const condExpr = decoded.cond === ConditionCode.EQ ? "flagZ" : "!flagZ";
+          const condExpr = condToJs(decoded.cond);
           lines.push(`${indent}x[${decoded.rd}] = (${condExpr}) ? ${regExpr(decoded.rn)} : (${regExpr(decoded.rm)} + 1n); // ${decoded.disassembly}`);
+          break;
+        }
+
+        case InstructionType.CSINV: {
+          const condExpr = condToJs(decoded.cond);
+          lines.push(`${indent}x[${decoded.rd}] = (${condExpr}) ? ${regExpr(decoded.rn)} : BigInt.asUintN(64, ~${regExpr(decoded.rm)}); // ${decoded.disassembly}`);
+          break;
+        }
+
+        case InstructionType.CSNEG: {
+          const condExpr = condToJs(decoded.cond);
+          lines.push(`${indent}x[${decoded.rd}] = (${condExpr}) ? ${regExpr(decoded.rn)} : BigInt.asUintN(64, -${regExpr(decoded.rm)}); // ${decoded.disassembly}`);
           break;
         }
 
@@ -320,7 +360,7 @@ export class StaticRecompiler {
           // Backwards branch: close the reconstructed do-while loop
           if (targetPC <= pc) {
             indentLevel = Math.max(1, indentLevel - 1);
-            const condExpr = decoded.cond === ConditionCode.NE ? "!flagZ" : "flagZ";
+            const condExpr = condToJs(decoded.cond);
             lines.push(`${getIndent()}} while (${condExpr}); // ${decoded.disassembly} -> ${targetHex}`);
           } else {
             lines.push(`${indent}// Conditional forward jump: ${decoded.disassembly} -> ${targetHex}`);
@@ -359,7 +399,10 @@ export class StaticRecompiler {
           else if (decoded.type === InstructionType.FNMUL) expr = `-(${a} * ${b})`;
           else if (decoded.type === InstructionType.FMAX) expr = `Math.max(${a}, ${b})`;
           else if (decoded.type === InstructionType.FMIN) expr = `Math.min(${a}, ${b})`;
-          lines.push(`${indent}${arr}[${decoded.rd * s}] = ${expr}; // ${decoded.disassembly}`);
+          const zeroUpper = decoded.isDouble
+            ? `vUint64[${decoded.rd * 2 + 1}] = 0n;`
+            : `vUint32[${decoded.rd * 4 + 1}] = 0; vUint64[${decoded.rd * 2 + 1}] = 0n;`;
+          lines.push(`${indent}${arr}[${decoded.rd * s}] = ${expr}; ${zeroUpper} // ${decoded.disassembly}`);
           break;
         }
 
@@ -368,12 +411,15 @@ export class StaticRecompiler {
         case InstructionType.FSQRT: {
           const arr = decoded.isDouble ? "vFloat64" : "vFloat32";
           const s = decoded.isDouble ? 2 : 4;
+          const zeroUpper = decoded.isDouble
+            ? `vUint64[${decoded.rd * 2 + 1}] = 0n;`
+            : `vUint32[${decoded.rd * 4 + 1}] = 0; vUint64[${decoded.rd * 2 + 1}] = 0n;`;
           if (decoded.type === InstructionType.FNEG) {
-            lines.push(`${indent}${arr}[${decoded.rd * s}] = -${arr}[${decoded.rn * s}]; // ${decoded.disassembly}`);
+            lines.push(`${indent}${arr}[${decoded.rd * s}] = -${arr}[${decoded.rn * s}]; ${zeroUpper} // ${decoded.disassembly}`);
           } else if (decoded.type === InstructionType.FABS) {
-            lines.push(`${indent}${arr}[${decoded.rd * s}] = Math.abs(${arr}[${decoded.rn * s}]); // ${decoded.disassembly}`);
+            lines.push(`${indent}${arr}[${decoded.rd * s}] = Math.abs(${arr}[${decoded.rn * s}]); ${zeroUpper} // ${decoded.disassembly}`);
           } else {
-            lines.push(`${indent}${arr}[${decoded.rd * s}] = Math.sqrt(${arr}[${decoded.rn * s}]); // ${decoded.disassembly}`);
+            lines.push(`${indent}${arr}[${decoded.rd * s}] = Math.sqrt(${arr}[${decoded.rn * s}]); ${zeroUpper} // ${decoded.disassembly}`);
           }
           break;
         }

@@ -167,11 +167,12 @@ console.log("Running Floating-Point & NEON SIMD Unit Tests...\n");
   const jsCode = aot.recompile(false);
   assert.ok(!jsCode.includes("UNHANDLED"), "AOT recompiler must have 0 unhandled instructions");
   assert.ok(jsCode.includes("vFloat32"), "AOT must include vector Float32 array");
+  assert.ok(jsCode.includes("let flagC = false;") && jsCode.includes("let flagV = false;"), "AOT prologue must declare flagC and flagV");
 
-  const bodySource = jsCode.replace(/export\s+function\s+runNative\s*\(\)\s*\{/, "").replace(/\}\s*$/, "");
+  const bodySource = `"use strict";\n` + jsCode.replace(/export\s+function\s+runNative\s*\(\)\s*\{/, "").replace(/\}\s*$/, "");
   const nativeFn = new Function(bodySource);
-  assert.strictEqual(nativeFn(), 42, "Static AOT runNative() must return exit code 42");
-  console.log("[PASS] StaticRecompiler executes neon_matrix.elf with 0 unhandled instructions and returns 42");
+  assert.strictEqual(nativeFn(), 42, "Static AOT runNative() must return exit code 42 in strict mode");
+  console.log("[PASS] StaticRecompiler executes neon_matrix.elf in strict mode with 0 unhandled instructions and returns 42");
 }
 
 // 7. Test x86-64 Translator on neon_matrix.elf

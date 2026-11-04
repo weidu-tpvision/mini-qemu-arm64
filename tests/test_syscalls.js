@@ -350,4 +350,59 @@ console.log("Running Level 1 Linux ARM64 System Call Unit Tests...\n");
   console.log("[PASS] Gap C: File system syscalls (sys_openat, sys_fstat, sys_lseek, sys_read, sys_write, sys_close) verified!");
 }
 
+// --- Test 9: File-backed sys_mmap, BigInt memory reads, shifted logical ops, and 32-bit STP/LDP ---
+{
+  const emu = new MiniQEMU();
+  emu.mountFile("rom.bin", new Uint8Array([0xde, 0xad, 0xbe, 0xef, 0x11, 0x22, 0x33, 0x44]));
+
+  // Verify BigInt address coercion in memory.read8/16/32/64
+  emu.memory.write32(0x00409000n, 0x12345678);
+  assert(emu.memory.read8(0x00409000n) === 0x78, "read8 must accept BigInt address");
+  assert(emu.memory.read16(0x00409000n) === 0x5678, "read16 must accept BigInt address");
+  assert(emu.memory.read32(0x00409000n) === 0x12345678, "read32 must accept BigInt address");
+  assert(emu.memory.read64(0x00409000n) === 0x12345678n, "read64 must accept BigInt address");
+
+  // Write "rom.bin\0" at 0x00405000
+  const nameBytes = new TextEncoder().encode("rom.bin\0");
+  for (let i = 0; i < nameBytes.length; i++) emu.memory.write8(0x00405000 + i, nameBytes[i]);
+
+  const instructions = [
+    // 1. Open "rom.bin" -> fd in x0 (3)
+    0xd2a00801, // movz x1, #0x40, lsl #16
+    0x91401421, // add x1, x1, #5, lsl #12 -> 0x00405000
+    0xd2800002, // movz x2, #0 (O_RDONLY)
+    0xd2800708, // movz x8, #56 (sys_openat)
+    0xd4000001, // svc #0 -> x0 = 3
+
+    // 2. sys_mmap(addr=0, len=8, prot=1, flags=2, fd=x0 (in x4), offset=0 (in x5)) -> syscall 222
+    0xaa0003e4, // mov x4, x0 (fd = 3)
+    0xd2800000, // movz x0, #0 (addr = NULL)
+    0xd2800101, // movz x1, #8 (len = 8)
+    0xd2800022, // movz x2, #1 (PROT_READ)
+    0xd2800043, // movz x3, #2 (MAP_PRIVATE)
+    0xd2800005, // movz x5, #0 (offset = 0)
+    0xd2801bc8, // movz x8, #222 (sys_mmap)
+    0xd4000001, // svc #0 -> x0 = 0x10000000
+
+    // 3. Test 32-bit LDP w1, w2, [x0] (loads 0xefbeadde into w1 and 0x44332211 into w2)
+    0x29400801, // ldp w1, w2, [x0]
+    // 4. Test 32-bit STP w1, w2, [sp, #-16]! and LDP w3, w4, [sp], #16
+    0x29be0be1, // stp w1, w2, [sp, #-16]!
+    0x28c213e3, // ldp w3, w4, [sp], #16
+    // 5. Test shifted logical instruction: orr x5, x3, x4, lsl #32
+    0xaa048065, // orr x5, x3, x4, lsl #32
+    // 6. Exit
+    0xd2800ba8, // movz x8, #93
+    0xd4000001  // svc #0
+  ];
+
+  emu.loadProgram(instructions, 0x00400000);
+  emu.run(30, false);
+
+  assert(emu.cpu.getReg(3) === 0xefbeadden, `32-bit LDP w3 should be 0xefbeadde, got 0x${emu.cpu.getReg(3).toString(16)}`);
+  assert(emu.cpu.getReg(4) === 0x44332211n, `32-bit LDP w4 should be 0x44332211, got 0x${emu.cpu.getReg(4).toString(16)}`);
+  assert(emu.cpu.getReg(5) === 0x44332211efbeadden, `Shifted ORR_REG x5 should be 0x44332211efbeadde, got 0x${emu.cpu.getReg(5).toString(16)}`);
+  console.log("[PASS] File-backed sys_mmap, BigInt memory reads, shifted logical ops, and 32-bit STP/LDP verified!");
+}
+
 console.log("\nAll Level 1 Linux ARM64 System Call Tests Passed Successfully!");
