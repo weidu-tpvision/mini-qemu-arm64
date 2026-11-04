@@ -316,8 +316,8 @@ function updateCPUState(changed = [], changedFRegs = []) {
   updateJitView();
 }
 
-function updateJitView() {
-  const stats = emulator.getJitStats();
+function updateJitView(targetEmu = emulator) {
+  const stats = targetEmu.getJitStats();
   if (jitBlocksVal) jitBlocksVal.textContent = stats.compiledBlocks;
   if (jitExecsVal) jitExecsVal.textContent = stats.blockExecutions.toLocaleString();
   if (jitCyclesVal) jitCyclesVal.textContent = stats.jitCycles.toLocaleString();
@@ -329,7 +329,7 @@ function updateJitView() {
   }
 
   if (jitCodeBlock) {
-    const blocks = emulator.getJitBlocks();
+    const blocks = targetEmu.getJitBlocks();
     if (blocks.length === 0) {
       jitCodeBlock.textContent = stats.enabled
         ? `// Dynamic JIT is enabled (Hot Threshold = ${stats.hotThreshold}).\n// Run the program to compile hot basic blocks on the fly...`
@@ -845,6 +845,10 @@ function isNeonBinary(filename = "") {
 }
 
 function runUntilFrameOrHalt(emuInstance, maxCycles = 2000000) {
+  if (emuInstance.jitEnabled && !emuInstance.onStep) {
+    emuInstance.runJit(emuInstance.cycleCount + maxCycles, true);
+    return Number(emuInstance.cpu.getReg(0));
+  }
   let steps = 0;
   while (!emuInstance.cpu.halted && steps < maxCycles) {
     const res = emuInstance.step(false);
@@ -1310,7 +1314,7 @@ if (runJitBenchBtn) {
     const speedup = (interpMs / jitMs).toFixed(1);
     jitBenchResultBadge.textContent = `${speedup}x Faster (${interpMs.toFixed(1)}ms vs ${jitMs.toFixed(2)}ms)`;
     appendTerminal(`[JIT Benchmark] ${ITERATIONS.toLocaleString()} runs of ${currentLoadedName}: Interpreter=${interpMs.toFixed(2)}ms | Dynamic JIT=${jitMs.toFixed(2)}ms -> ${speedup}x Speedup!\n`, "halt");
-    updateJitView();
+    updateJitView(jitEmu);
   });
 }
 

@@ -130,11 +130,15 @@ export class JitCompiler {
    * Disassembles a Basic Block starting from `startPC` until a branch, call, return, svc,
    * or unknown instruction is encountered, or max instructions is reached.
    */
-  discoverBlock(startPC, memory) {
+  discoverBlock(startPC, memory, breakpoints = null) {
     const instructions = [];
     let curPC = Number(startPC);
 
     for (let i = 0; i < this.maxBlockInstructions; i++) {
+      if (i > 0 && breakpoints && breakpoints.has(curPC)) {
+        break; // Stop right before the breakpoint
+      }
+
       let raw;
       try {
         raw = memory.read32(curPC);
@@ -160,13 +164,13 @@ export class JitCompiler {
   /**
    * Compiles a Basic Block starting at `startPC` into a specialized JavaScript function.
    */
-  compileBlock(startPC, memory) {
+  compileBlock(startPC, memory, breakpoints = null) {
     const numPC = Number(startPC);
     if (this.blockCache.has(numPC)) {
       return this.blockCache.get(numPC);
     }
 
-    const instructions = this.discoverBlock(numPC, memory);
+    const instructions = this.discoverBlock(numPC, memory, breakpoints);
     if (instructions.length === 0) {
       return null;
     }
@@ -224,6 +228,18 @@ export class JitCompiler {
     const regExpr = (r) => (r === 31 ? "0n" : `x[${r}]`);
     const spOrReg = (r) => (r === 31 ? "cpu.sp" : `x[${r}]`);
 
+    const shiftedRmExpr = (d) => {
+      const bits = d.sf === 0 ? 32 : 64;
+      const rmBase = `BigInt.asUintN(${bits}, ${regExpr(d.rm)})`;
+      if (!d.imm6) return rmBase;
+      const amt = d.imm6 & (d.sf === 0 ? 0x1f : 0x3f);
+      if (!amt) return rmBase;
+      if (d.shift === 0b00) return `BigInt.asUintN(${bits}, ${rmBase} << ${amt}n)`;
+      if (d.shift === 0b01) return `BigInt.asUintN(${bits}, ${rmBase} >> ${amt}n)`;
+      if (d.shift === 0b10) return `BigInt.asUintN(${bits}, BigInt.asIntN(${bits}, ${rmBase}) >> ${amt}n)`;
+      return rmBase;
+    };
+
     for (let idx = 0; idx < instructions.length; idx++) {
       const { pc, decoded } = instructions[idx];
       const isLast = (idx === instructions.length - 1);
@@ -235,13 +251,15 @@ export class JitCompiler {
         case InstructionType.MOVZ:
         case InstructionType.MOVN:
           if (decoded.rd !== 31) {
-            lines.push(`x[${decoded.rd}] = ${decoded.immValue}n;`);
+            const bits = decoded.sf === 0 ? 32 : 64;
+            lines.push(`x[${decoded.rd}] = BigInt.asUintN(${bits}, ${decoded.immValue}n);`);
           }
           break;
 
         case InstructionType.MOVK:
           if (decoded.rd !== 31) {
-            lines.push(`x[${decoded.rd}] = (x[${decoded.rd}] & ~(0xffffn << ${decoded.shift}n)) | (${BigInt(decoded.imm16) << BigInt(decoded.shift)}n);`);
+            const bits = decoded.sf === 0 ? 32 : 64;
+            lines.push(`x[${decoded.rd}] = BigInt.asUintN(${bits}, (x[${decoded.rd}] & ~(0xffffn << ${decoded.shift}n)) | (${BigInt(decoded.imm16) << BigInt(decoded.shift)}n));`);
           }
           break;
 
@@ -259,67 +277,67 @@ export class JitCompiler {
           break;
         }
 
-        case InstructionType.ADD_IMM:
+        case InstructionType.ADD_IMM: {
+          const bits = decoded.sf === 0 ? 32 : 64;
           if (decoded.rd === 31) {
-            lines.push(`cpu.sp = BigInt.asUintN(64, ${spOrReg(decoded.rn)} + ${decoded.immValue}n);`);
+            lines.push(`cpu.sp = BigInt.asUintN(64, ${spOrReg(decoded.rn)} + 0x${decoded.immValue.toString(16)}n);`);
           } else {
-            lines.push(`x[${decoded.rd}] = BigInt.asUintN(64, ${spOrReg(decoded.rn)} + ${decoded.immValue}n);`);
+            lines.push(`x[${decoded.rd}] = BigInt.asUintN(${bits}, BigInt.asUintN(${bits}, ${spOrReg(decoded.rn)}) + 0x${decoded.immValue.toString(16)}n);`);
           }
           break;
+        }
 
-        case InstructionType.SUB_IMM:
+        case InstructionType.SUB_IMM: {
+          const bits = decoded.sf === 0 ? 32 : 64;
           if (decoded.rd === 31) {
-            lines.push(`cpu.sp = BigInt.asUintN(64, ${spOrReg(decoded.rn)} - ${decoded.immValue}n);`);
+            lines.push(`cpu.sp = BigInt.asUintN(64, ${spOrReg(decoded.rn)} - 0x${decoded.immValue.toString(16)}n);`);
           } else {
-            lines.push(`x[${decoded.rd}] = BigInt.asUintN(64, ${spOrReg(decoded.rn)} - ${decoded.immValue}n);`);
+            lines.push(`x[${decoded.rd}] = BigInt.asUintN(${bits}, BigInt.asUintN(${bits}, ${spOrReg(decoded.rn)}) - 0x${decoded.immValue.toString(16)}n);`);
           }
           break;
+        }
 
         case InstructionType.SUBS_IMM: {
           lines.push(`{`);
-          lines.push(`  const a = ${spOrReg(decoded.rn)};`);
-          lines.push(`  const b = ${decoded.immValue}n;`);
+          const bits = decoded.sf === 0 ? 32 : 64;
+          const signBit = bits === 32 ? "0x80000000n" : "0x8000000000000000n";
+          const minInt = bits === 32 ? "-0x80000000n" : "-0x8000000000000000n";
+          const maxInt = bits === 32 ? "0x7fffffffn" : "0x7fffffffffffffffn";
+          lines.push(`  const a = BigInt.asUintN(${bits}, ${spOrReg(decoded.rn)});`);
+          lines.push(`  const b = BigInt.asUintN(${bits}, 0x${decoded.immValue.toString(16)}n);`);
           lines.push(`  const diff = a - b;`);
-          lines.push(`  const res = BigInt.asUintN(64, diff);`);
+          lines.push(`  const res = BigInt.asUintN(${bits}, diff);`);
           if (decoded.rd !== 31) {
             lines.push(`  x[${decoded.rd}] = res;`);
           }
           lines.push(`  flags.Z = (res === 0n);`);
-          lines.push(`  flags.N = ((res & 0x8000000000000000n) !== 0n);`);
+          lines.push(`  flags.N = ((res & ${signBit}) !== 0n);`);
           lines.push(`  flags.C = (a >= b);`);
-          lines.push(`  const sA = BigInt.asIntN(64, a);`);
-          lines.push(`  const sB = BigInt.asIntN(64, b);`);
+          lines.push(`  const sA = BigInt.asIntN(${bits}, a);`);
+          lines.push(`  const sB = BigInt.asIntN(${bits}, b);`);
           lines.push(`  const sDiff = sA - sB;`);
-          lines.push(`  flags.V = (sDiff < -0x8000000000000000n || sDiff > 0x7fffffffffffffffn);`);
+          lines.push(`  flags.V = (sDiff < ${minInt} || sDiff > ${maxInt});`);
           lines.push(`}`);
           break;
         }
 
         // --- Data Processing: Register ---
         case InstructionType.ADD_REG: {
-          const shiftExpr = decoded.imm6 > 0
-            ? (decoded.shift === 0b01
-                ? `(${regExpr(decoded.rm)} >> ${decoded.imm6}n)`
-                : decoded.shift === 0b10
-                ? `(BigInt.asIntN(64, ${regExpr(decoded.rm)}) >> ${decoded.imm6}n)`
-                : `(${regExpr(decoded.rm)} << ${decoded.imm6}n)`)
-            : regExpr(decoded.rm);
+          const bits = decoded.sf === 0 ? 32 : 64;
+          const rnExpr = `BigInt.asUintN(${bits}, ${regExpr(decoded.rn)})`;
+          const rmExpr = shiftedRmExpr(decoded);
           if (decoded.rd !== 31) {
-            lines.push(`x[${decoded.rd}] = BigInt.asUintN(${decoded.sf === 0 ? 32 : 64}, ${regExpr(decoded.rn)} + ${shiftExpr});`);
+            lines.push(`x[${decoded.rd}] = BigInt.asUintN(${bits}, ${rnExpr} + ${rmExpr});`);
           }
           break;
         }
 
         case InstructionType.SUB_REG: {
-          const shiftExpr = decoded.imm6 > 0
-            ? (decoded.shift === 0b01
-                ? `(${regExpr(decoded.rm)} >> ${decoded.imm6}n)`
-                : decoded.shift === 0b10
-                ? `(BigInt.asIntN(64, ${regExpr(decoded.rm)}) >> ${decoded.imm6}n)`
-                : `(${regExpr(decoded.rm)} << ${decoded.imm6}n)`)
-            : regExpr(decoded.rm);
+          const bits = decoded.sf === 0 ? 32 : 64;
+          const rnExpr = `BigInt.asUintN(${bits}, ${regExpr(decoded.rn)})`;
+          const rmExpr = shiftedRmExpr(decoded);
           if (decoded.rd !== 31) {
-            lines.push(`x[${decoded.rd}] = BigInt.asUintN(${decoded.sf === 0 ? 32 : 64}, ${regExpr(decoded.rn)} - ${shiftExpr});`);
+            lines.push(`x[${decoded.rd}] = BigInt.asUintN(${bits}, ${rnExpr} - ${rmExpr});`);
           }
           break;
         }
@@ -327,18 +345,13 @@ export class JitCompiler {
         case InstructionType.SUBS_REG: {
           lines.push(`{`);
           const bits = decoded.sf === 0 ? 32 : 64;
-          const signBit = decoded.sf === 0 ? "0x80000000n" : "0x8000000000000000n";
-          const minInt = decoded.sf === 0 ? "-0x80000000n" : "-0x8000000000000000n";
-          const maxInt = decoded.sf === 0 ? "0x7fffffffn" : "0x7fffffffffffffffn";
-          const shiftExpr = decoded.imm6 > 0
-            ? (decoded.shift === 0b01
-                ? `(${regExpr(decoded.rm)} >> ${decoded.imm6}n)`
-                : decoded.shift === 0b10
-                ? `(BigInt.asIntN(${bits}, ${regExpr(decoded.rm)}) >> ${decoded.imm6}n)`
-                : `(${regExpr(decoded.rm)} << ${decoded.imm6}n)`)
-            : regExpr(decoded.rm);
-          lines.push(`  const a = BigInt.asUintN(${bits}, ${regExpr(decoded.rn)});`);
-          lines.push(`  const b = BigInt.asUintN(${bits}, ${shiftExpr});`);
+          const signBit = bits === 32 ? "0x80000000n" : "0x8000000000000000n";
+          const minInt = bits === 32 ? "-0x80000000n" : "-0x8000000000000000n";
+          const maxInt = bits === 32 ? "0x7fffffffn" : "0x7fffffffffffffffn";
+          const rnExpr = `BigInt.asUintN(${bits}, ${regExpr(decoded.rn)})`;
+          const rmExpr = shiftedRmExpr(decoded);
+          lines.push(`  const a = ${rnExpr};`);
+          lines.push(`  const b = ${rmExpr};`);
           lines.push(`  const diff = a - b;`);
           lines.push(`  const res = BigInt.asUintN(${bits}, diff);`);
           if (decoded.rd !== 31) {
@@ -356,58 +369,40 @@ export class JitCompiler {
         }
 
         case InstructionType.AND_REG: {
-          const shiftExpr = decoded.imm6 > 0
-            ? (decoded.shift === 0b01
-                ? `(${regExpr(decoded.rm)} >> ${decoded.imm6}n)`
-                : decoded.shift === 0b10
-                ? `(BigInt.asIntN(64, ${regExpr(decoded.rm)}) >> ${decoded.imm6}n)`
-                : `(${regExpr(decoded.rm)} << ${decoded.imm6}n)`)
-            : regExpr(decoded.rm);
+          const bits = decoded.sf === 0 ? 32 : 64;
+          const rnExpr = `BigInt.asUintN(${bits}, ${regExpr(decoded.rn)})`;
+          const rmExpr = shiftedRmExpr(decoded);
           if (decoded.rd !== 31) {
-            lines.push(`x[${decoded.rd}] = BigInt.asUintN(${decoded.sf === 0 ? 32 : 64}, ${regExpr(decoded.rn)} & ${shiftExpr});`);
+            lines.push(`x[${decoded.rd}] = BigInt.asUintN(${bits}, ${rnExpr} & ${rmExpr});`);
           }
           break;
         }
 
         case InstructionType.ORR_REG: {
-          const shiftExpr = decoded.imm6 > 0
-            ? (decoded.shift === 0b01
-                ? `(${regExpr(decoded.rm)} >> ${decoded.imm6}n)`
-                : decoded.shift === 0b10
-                ? `(BigInt.asIntN(64, ${regExpr(decoded.rm)}) >> ${decoded.imm6}n)`
-                : `(${regExpr(decoded.rm)} << ${decoded.imm6}n)`)
-            : regExpr(decoded.rm);
+          const bits = decoded.sf === 0 ? 32 : 64;
+          const rnExpr = `BigInt.asUintN(${bits}, ${regExpr(decoded.rn)})`;
+          const rmExpr = shiftedRmExpr(decoded);
           if (decoded.rd !== 31) {
-            lines.push(`x[${decoded.rd}] = BigInt.asUintN(${decoded.sf === 0 ? 32 : 64}, ${regExpr(decoded.rn)} | ${shiftExpr});`);
+            lines.push(`x[${decoded.rd}] = BigInt.asUintN(${bits}, ${rnExpr} | ${rmExpr});`);
           }
           break;
         }
 
         case InstructionType.EOR_REG: {
-          const shiftExpr = decoded.imm6 > 0
-            ? (decoded.shift === 0b01
-                ? `(${regExpr(decoded.rm)} >> ${decoded.imm6}n)`
-                : decoded.shift === 0b10
-                ? `(BigInt.asIntN(64, ${regExpr(decoded.rm)}) >> ${decoded.imm6}n)`
-                : `(${regExpr(decoded.rm)} << ${decoded.imm6}n)`)
-            : regExpr(decoded.rm);
+          const bits = decoded.sf === 0 ? 32 : 64;
+          const rnExpr = `BigInt.asUintN(${bits}, ${regExpr(decoded.rn)})`;
+          const rmExpr = shiftedRmExpr(decoded);
           if (decoded.rd !== 31) {
-            lines.push(`x[${decoded.rd}] = BigInt.asUintN(${decoded.sf === 0 ? 32 : 64}, ${regExpr(decoded.rn)} ^ ${shiftExpr});`);
+            lines.push(`x[${decoded.rd}] = BigInt.asUintN(${bits}, ${rnExpr} ^ ${rmExpr});`);
           }
           break;
         }
 
         case InstructionType.MVN_REG: {
           const bits = decoded.sf === 0 ? 32 : 64;
-          const shiftExpr = decoded.imm6 > 0
-            ? (decoded.shift === 0b01
-                ? `(${regExpr(decoded.rm)} >> ${decoded.imm6}n)`
-                : decoded.shift === 0b10
-                ? `(BigInt.asIntN(${bits}, ${regExpr(decoded.rm)}) >> ${decoded.imm6}n)`
-                : `(${regExpr(decoded.rm)} << ${decoded.imm6}n)`)
-            : regExpr(decoded.rm);
+          const rmExpr = shiftedRmExpr(decoded);
           if (decoded.rd !== 31) {
-            lines.push(`x[${decoded.rd}] = BigInt.asUintN(${bits}, ~${shiftExpr});`);
+            lines.push(`x[${decoded.rd}] = BigInt.asUintN(${bits}, ~${rmExpr});`);
           }
           break;
         }
@@ -434,7 +429,7 @@ export class JitCompiler {
         case InstructionType.UDIV:
           if (decoded.rd !== 31) {
             const bits = decoded.sf === 0 ? 32 : 64;
-            lines.push(`{ const d = ${regExpr(decoded.rm)}; x[${decoded.rd}] = d === 0n ? 0n : BigInt.asUintN(${bits}, ${regExpr(decoded.rn)} / d); }`);
+            lines.push(`{ const a = BigInt.asUintN(${bits}, ${regExpr(decoded.rn)}); const d = BigInt.asUintN(${bits}, ${regExpr(decoded.rm)}); x[${decoded.rd}] = d === 0n ? 0n : BigInt.asUintN(${bits}, a / d); }`);
           }
           break;
 
@@ -482,25 +477,29 @@ export class JitCompiler {
         // --- Conditionals ---
         case InstructionType.CSEL:
           if (decoded.rd !== 31) {
-            lines.push(`x[${decoded.rd}] = ${jitConditionExpr(decoded.cond)} ? ${regExpr(decoded.rn)} : ${regExpr(decoded.rm)};`);
+            const bits = decoded.sf === 0 ? 32 : 64;
+            lines.push(`x[${decoded.rd}] = ${jitConditionExpr(decoded.cond)} ? BigInt.asUintN(${bits}, ${regExpr(decoded.rn)}) : BigInt.asUintN(${bits}, ${regExpr(decoded.rm)});`);
           }
           break;
 
         case InstructionType.CSINC:
           if (decoded.rd !== 31) {
-            lines.push(`x[${decoded.rd}] = ${jitConditionExpr(decoded.cond)} ? ${regExpr(decoded.rn)} : BigInt.asUintN(64, ${regExpr(decoded.rm)} + 1n);`);
+            const bits = decoded.sf === 0 ? 32 : 64;
+            lines.push(`x[${decoded.rd}] = ${jitConditionExpr(decoded.cond)} ? BigInt.asUintN(${bits}, ${regExpr(decoded.rn)}) : BigInt.asUintN(${bits}, ${regExpr(decoded.rm)} + 1n);`);
           }
           break;
 
         case InstructionType.CSINV:
           if (decoded.rd !== 31) {
-            lines.push(`x[${decoded.rd}] = ${jitConditionExpr(decoded.cond)} ? ${regExpr(decoded.rn)} : BigInt.asUintN(64, ~${regExpr(decoded.rm)});`);
+            const bits = decoded.sf === 0 ? 32 : 64;
+            lines.push(`x[${decoded.rd}] = ${jitConditionExpr(decoded.cond)} ? BigInt.asUintN(${bits}, ${regExpr(decoded.rn)}) : BigInt.asUintN(${bits}, ~${regExpr(decoded.rm)});`);
           }
           break;
 
         case InstructionType.CSNEG:
           if (decoded.rd !== 31) {
-            lines.push(`x[${decoded.rd}] = ${jitConditionExpr(decoded.cond)} ? ${regExpr(decoded.rn)} : BigInt.asUintN(64, -${regExpr(decoded.rm)});`);
+            const bits = decoded.sf === 0 ? 32 : 64;
+            lines.push(`x[${decoded.rd}] = ${jitConditionExpr(decoded.cond)} ? BigInt.asUintN(${bits}, ${regExpr(decoded.rn)}) : BigInt.asUintN(${bits}, -${regExpr(decoded.rm)});`);
           }
           break;
 
@@ -650,9 +649,10 @@ export class JitCompiler {
             lines.push(`  const addr = targetAddr;`);
           }
           if (decoded.rt !== 31) {
+            const bits = decoded.sf === 0 ? 32 : 64;
             lines.push(`  const h = memory.read16(addr);`);
             lines.push(`  const sh = (h & 0x8000) ? (h | ~0xffff) : h;`);
-            lines.push(`  x[${decoded.rt}] = BigInt.asUintN(64, BigInt(sh));`);
+            lines.push(`  x[${decoded.rt}] = BigInt.asUintN(${bits}, BigInt(sh));`);
           }
           if (decoded.preIndex || decoded.postIndex) {
             lines.push(`  ${spOrReg(decoded.rn)} = BigInt.asUintN(64, BigInt(baseAddr + ${decoded.offsetBytes}));`);
@@ -710,9 +710,10 @@ export class JitCompiler {
             lines.push(`  const addr = targetAddr;`);
           }
           if (decoded.rt !== 31) {
+            const bits = decoded.sf === 0 ? 32 : 64;
             lines.push(`  const b = memory.read8(addr);`);
             lines.push(`  const sb = (b & 0x80) ? (b | ~0xff) : b;`);
-            lines.push(`  x[${decoded.rt}] = BigInt.asUintN(64, BigInt(sb));`);
+            lines.push(`  x[${decoded.rt}] = BigInt.asUintN(${bits}, BigInt(sb));`);
           }
           if (decoded.preIndex || decoded.postIndex) {
             lines.push(`  ${spOrReg(decoded.rn)} = BigInt.asUintN(64, BigInt(baseAddr + ${decoded.offsetBytes}));`);
@@ -1023,24 +1024,21 @@ export class JitCompiler {
 
         case InstructionType.FCVTZS: {
           const fVal = decoded.isDouble ? `vFloat64[${decoded.rn} * 2]` : `vFloat32[${decoded.rn} * 4]`;
+          const bits = decoded.sf === 0 ? 32 : 64;
+          const maxInt = bits === 32 ? "0x7fffffffn" : "0x7fffffffffffffffn";
+          const minInt = bits === 32 ? "-0x80000000n" : "-0x8000000000000000n";
           if (decoded.rd !== 31) {
-            if (decoded.sf === 0) {
-              lines.push(`{ const f = ${fVal}; let t = Number.isNaN(f) ? 0 : Math.trunc(f); if (t > 0x7fffffff) t = 0x7fffffff; else if (t < -0x80000000) t = -0x80000000; x[${decoded.rd}] = BigInt.asUintN(32, BigInt(t)); }`);
-            } else {
-              lines.push(`{ const f = ${fVal}; let t = Number.isNaN(f) ? 0 : Math.trunc(f); x[${decoded.rd}] = BigInt.asUintN(64, BigInt(t)); }`);
-            }
+            lines.push(`{ const f = ${fVal}; let res = 0n; if (!Number.isNaN(f)) { if (f >= Number(${maxInt})) res = ${maxInt}; else if (f <= Number(${minInt})) res = ${minInt}; else res = BigInt(Math.trunc(f)); } x[${decoded.rd}] = BigInt.asUintN(${bits}, res); }`);
           }
           break;
         }
 
         case InstructionType.FCVTZU: {
           const fVal = decoded.isDouble ? `vFloat64[${decoded.rn} * 2]` : `vFloat32[${decoded.rn} * 4]`;
+          const bits = decoded.sf === 0 ? 32 : 64;
+          const maxUint = bits === 32 ? "0xffffffffn" : "0xffffffffffffffffn";
           if (decoded.rd !== 31) {
-            if (decoded.sf === 0) {
-              lines.push(`{ const f = ${fVal}; let t = Number.isNaN(f) || f < 0 ? 0 : Math.trunc(f); if (t > 0xffffffff) t = 0xffffffff; x[${decoded.rd}] = BigInt(t >>> 0); }`);
-            } else {
-              lines.push(`{ const f = ${fVal}; let t = Number.isNaN(f) || f < 0 ? 0 : Math.trunc(f); x[${decoded.rd}] = BigInt.asUintN(64, BigInt(t)); }`);
-            }
+            lines.push(`{ const f = ${fVal}; let res = 0n; if (!Number.isNaN(f) && f > 0) { if (f >= Number(${maxUint})) res = ${maxUint}; else res = BigInt(Math.trunc(f)); } x[${decoded.rd}] = BigInt.asUintN(${bits}, res); }`);
           }
           break;
         }
@@ -1048,14 +1046,31 @@ export class JitCompiler {
         case InstructionType.FMOV: {
           if (decoded.isImm) {
             if (decoded.isDouble) {
-              lines.push(`vFloat64[${decoded.rd} * 2] = ${decoded.immFloat};`);
+              lines.push(`vFloat64[${decoded.rd} * 2] = ${decoded.immValue};`);
               lines.push(`vUint64[${decoded.rd} * 2 + 1] = 0n;`);
             } else {
-              lines.push(`vFloat32[${decoded.rd} * 4] = ${decoded.immFloat};`);
+              lines.push(`vFloat32[${decoded.rd} * 4] = ${decoded.immValue};`);
               lines.push(`vUint32[${decoded.rd} * 4 + 1] = 0;`);
               lines.push(`vUint64[${decoded.rd} * 2 + 1] = 0n;`);
             }
-          } else if (decoded.isFmovReg) {
+          } else if (decoded.isGprToFpr) {
+            if (decoded.isDouble) {
+              lines.push(`vUint64[${decoded.rd} * 2] = ${regExpr(decoded.rn)};`);
+              lines.push(`vUint64[${decoded.rd} * 2 + 1] = 0n;`);
+            } else {
+              lines.push(`vUint32[${decoded.rd} * 4] = Number(${regExpr(decoded.rn)} & 0xffffffffn) >>> 0;`);
+              lines.push(`vUint32[${decoded.rd} * 4 + 1] = 0;`);
+              lines.push(`vUint64[${decoded.rd} * 2 + 1] = 0n;`);
+            }
+          } else if (decoded.isFprToGpr) {
+            if (decoded.rd !== 31) {
+              if (decoded.isDouble) {
+                lines.push(`x[${decoded.rd}] = vUint64[${decoded.rn} * 2];`);
+              } else {
+                lines.push(`x[${decoded.rd}] = BigInt(vUint32[${decoded.rn} * 4] >>> 0);`);
+              }
+            }
+          } else {
             if (decoded.isDouble) {
               lines.push(`vFloat64[${decoded.rd} * 2] = vFloat64[${decoded.rn} * 2];`);
               lines.push(`vUint64[${decoded.rd} * 2 + 1] = 0n;`);
@@ -1064,28 +1079,28 @@ export class JitCompiler {
               lines.push(`vUint32[${decoded.rd} * 4 + 1] = 0;`);
               lines.push(`vUint64[${decoded.rd} * 2 + 1] = 0n;`);
             }
-          } else if (decoded.fmovType === "FMOV_GPR_TO_VEC") {
-            if (decoded.sf === 1) {
-              lines.push(`vUint64[${decoded.rd} * 2] = ${regExpr(decoded.rn)};`);
-              lines.push(`vUint64[${decoded.rd} * 2 + 1] = 0n;`);
-            } else {
-              lines.push(`vUint32[${decoded.rd} * 4] = Number(${regExpr(decoded.rn)} & 0xffffffffn);`);
-              lines.push(`vUint32[${decoded.rd} * 4 + 1] = 0;`);
-              lines.push(`vUint64[${decoded.rd} * 2 + 1] = 0n;`);
-            }
-          } else if (decoded.fmovType === "FMOV_VEC_TO_GPR") {
-            if (decoded.rd !== 31) {
-              if (decoded.sf === 1) {
-                lines.push(`x[${decoded.rd}] = vUint64[${decoded.rn} * 2];`);
-              } else {
-                lines.push(`x[${decoded.rd}] = BigInt(vUint32[${decoded.rn} * 4] >>> 0);`);
-              }
-            }
           }
           break;
         }
 
         // --- NEON Vector Instructions ---
+        case InstructionType.FNEG_VEC:
+        case InstructionType.FABS_VEC: {
+          const lanes = decoded.lanes;
+          const isD = decoded.isDouble;
+          const vArr = isD ? "vFloat64" : "vFloat32";
+          const scale = isD ? 2 : 4;
+          for (let l = 0; l < lanes; l++) {
+            const a = `${vArr}[${decoded.rn} * ${scale} + ${l}]`;
+            const op = decoded.type === InstructionType.FNEG_VEC ? `-${a}` : `Math.abs(${a})`;
+            lines.push(`${vArr}[${decoded.rd} * ${scale} + ${l}] = ${op};`);
+          }
+          if (!decoded.Q) {
+            lines.push(`vUint64[${decoded.rd} * 2 + 1] = 0n;`);
+          }
+          break;
+        }
+
         case InstructionType.FADD_VEC:
         case InstructionType.FSUB_VEC:
         case InstructionType.FMUL_VEC:
@@ -1117,7 +1132,6 @@ export class JitCompiler {
         }
 
         case InstructionType.FADDP_VEC: {
-          const lanes = decoded.lanes;
           if (decoded.isDouble) {
             lines.push(`{`);
             lines.push(`  const a0 = vFloat64[${decoded.rn} * 2], a1 = vFloat64[${decoded.rn} * 2 + 1];`);
@@ -1125,7 +1139,7 @@ export class JitCompiler {
             lines.push(`  vFloat64[${decoded.rd} * 2] = a0 + a1;`);
             lines.push(`  vFloat64[${decoded.rd} * 2 + 1] = b0 + b1;`);
             lines.push(`}`);
-          } else {
+          } else if (decoded.Q) {
             lines.push(`{`);
             lines.push(`  const p0 = vFloat32[${decoded.rn} * 4] + vFloat32[${decoded.rn} * 4 + 1];`);
             lines.push(`  const p1 = vFloat32[${decoded.rn} * 4 + 2] + vFloat32[${decoded.rn} * 4 + 3];`);
@@ -1134,6 +1148,14 @@ export class JitCompiler {
             lines.push(`  vFloat32[${decoded.rd} * 4] = p0; vFloat32[${decoded.rd} * 4 + 1] = p1;`);
             lines.push(`  vFloat32[${decoded.rd} * 4 + 2] = p2; vFloat32[${decoded.rd} * 4 + 3] = p3;`);
             lines.push(`}`);
+          } else {
+            lines.push(`{`);
+            lines.push(`  const p0 = vFloat32[${decoded.rn} * 4] + vFloat32[${decoded.rn} * 4 + 1];`);
+            lines.push(`  const p1 = vFloat32[${decoded.rm} * 4] + vFloat32[${decoded.rm} * 4 + 1];`);
+            lines.push(`  vFloat32[${decoded.rd} * 4] = p0;`);
+            lines.push(`  vFloat32[${decoded.rd} * 4 + 1] = p1;`);
+            lines.push(`  vUint64[${decoded.rd} * 2 + 1] = 0n;`);
+            lines.push(`}`);
           }
           break;
         }
@@ -1141,14 +1163,15 @@ export class JitCompiler {
         case InstructionType.ADD_VEC:
         case InstructionType.SUB_VEC:
         case InstructionType.MUL_VEC: {
+          const elemSize = decoded.size ?? decoded.elemSize;
           const maxLanes = decoded.lanes;
-          const arr = decoded.elemSize === 0 ? "vBytes" : decoded.elemSize === 1 ? "vUint16" : decoded.elemSize === 2 ? "vUint32" : "vUint64";
-          const scale = 16 >> decoded.elemSize;
+          const arr = elemSize === 0 ? "vBytes" : elemSize === 1 ? "vUint16" : elemSize === 2 ? "vUint32" : "vUint64";
+          const scale = 16 >> elemSize;
           for (let l = 0; l < maxLanes; l++) {
             const a = `${arr}[${decoded.rn} * ${scale} + ${l}]`;
             const b = `${arr}[${decoded.rm} * ${scale} + ${l}]`;
             let op = "";
-            if (decoded.elemSize === 3) {
+            if (elemSize === 3) {
               if (decoded.type === InstructionType.ADD_VEC) op = `BigInt.asUintN(64, ${a} + ${b})`;
               else if (decoded.type === InstructionType.SUB_VEC) op = `BigInt.asUintN(64, ${a} - ${b})`;
               else op = `BigInt.asUintN(64, ${a} * ${b})`;
@@ -1165,31 +1188,73 @@ export class JitCompiler {
           break;
         }
 
+        case InstructionType.ADDP_VEC: {
+          const elemSize = decoded.size ?? decoded.elemSize;
+          const maxLanes = decoded.lanes;
+          const half = maxLanes >> 1;
+          const arr = elemSize === 0 ? "vBytes" : elemSize === 1 ? "vUint16" : elemSize === 2 ? "vUint32" : "vUint64";
+          const scale = 16 >> elemSize;
+          lines.push(`{`);
+          for (let i = 0; i < half; i++) {
+            const a0 = `${arr}[${decoded.rn} * ${scale} + ${i * 2}]`;
+            const a1 = `${arr}[${decoded.rn} * ${scale} + ${i * 2 + 1}]`;
+            const b0 = `${arr}[${decoded.rm} * ${scale} + ${i * 2}]`;
+            const b1 = `${arr}[${decoded.rm} * ${scale} + ${i * 2 + 1}]`;
+            lines.push(`  const r${i} = ${elemSize === 3 ? `BigInt.asUintN(64, ${a0} + ${a1})` : `(${a0} + ${a1})`};`);
+            lines.push(`  const r${half + i} = ${elemSize === 3 ? `BigInt.asUintN(64, ${b0} + ${b1})` : `(${b0} + ${b1})`};`);
+          }
+          for (let l = 0; l < maxLanes; l++) {
+            lines.push(`  ${arr}[${decoded.rd} * ${scale} + ${l}] = r${l};`);
+          }
+          if (!decoded.Q) {
+            lines.push(`  vUint64[${decoded.rd} * 2 + 1] = 0n;`);
+          }
+          lines.push(`}`);
+          break;
+        }
+
         case InstructionType.AND_VEC:
           lines.push(`vUint64[${decoded.rd} * 2] = vUint64[${decoded.rn} * 2] & vUint64[${decoded.rm} * 2];`);
-          lines.push(`vUint64[${decoded.rd} * 2 + 1] = vUint64[${decoded.rn} * 2 + 1] & vUint64[${decoded.rm} * 2 + 1];`);
+          if (decoded.Q) {
+            lines.push(`vUint64[${decoded.rd} * 2 + 1] = vUint64[${decoded.rn} * 2 + 1] & vUint64[${decoded.rm} * 2 + 1];`);
+          } else {
+            lines.push(`vUint64[${decoded.rd} * 2 + 1] = 0n;`);
+          }
           break;
 
         case InstructionType.ORR_VEC:
           lines.push(`vUint64[${decoded.rd} * 2] = vUint64[${decoded.rn} * 2] | vUint64[${decoded.rm} * 2];`);
-          lines.push(`vUint64[${decoded.rd} * 2 + 1] = vUint64[${decoded.rn} * 2 + 1] | vUint64[${decoded.rm} * 2 + 1];`);
+          if (decoded.Q) {
+            lines.push(`vUint64[${decoded.rd} * 2 + 1] = vUint64[${decoded.rn} * 2 + 1] | vUint64[${decoded.rm} * 2 + 1];`);
+          } else {
+            lines.push(`vUint64[${decoded.rd} * 2 + 1] = 0n;`);
+          }
           break;
 
         case InstructionType.EOR_VEC:
           lines.push(`vUint64[${decoded.rd} * 2] = vUint64[${decoded.rn} * 2] ^ vUint64[${decoded.rm} * 2];`);
-          lines.push(`vUint64[${decoded.rd} * 2 + 1] = vUint64[${decoded.rn} * 2 + 1] ^ vUint64[${decoded.rm} * 2 + 1];`);
+          if (decoded.Q) {
+            lines.push(`vUint64[${decoded.rd} * 2 + 1] = vUint64[${decoded.rn} * 2 + 1] ^ vUint64[${decoded.rm} * 2 + 1];`);
+          } else {
+            lines.push(`vUint64[${decoded.rd} * 2 + 1] = 0n;`);
+          }
           break;
 
         case InstructionType.NOT_VEC:
           lines.push(`vUint64[${decoded.rd} * 2] = ~vUint64[${decoded.rn} * 2];`);
-          lines.push(`vUint64[${decoded.rd} * 2 + 1] = ~vUint64[${decoded.rn} * 2 + 1];`);
+          if (decoded.Q) {
+            lines.push(`vUint64[${decoded.rd} * 2 + 1] = ~vUint64[${decoded.rn} * 2 + 1];`);
+          } else {
+            lines.push(`vUint64[${decoded.rd} * 2 + 1] = 0n;`);
+          }
           break;
 
         case InstructionType.DUP_GEN: {
-          const arr = decoded.elemSize === 0 ? "vBytes" : decoded.elemSize === 1 ? "vUint16" : decoded.elemSize === 2 ? "vUint32" : "vUint64";
-          const scale = 16 >> decoded.elemSize;
+          const elemSize = decoded.size ?? decoded.elemSize;
+          const arr = elemSize === 0 ? "vBytes" : elemSize === 1 ? "vUint16" : elemSize === 2 ? "vUint32" : "vUint64";
+          const scale = 16 >> elemSize;
           const maxLanes = decoded.Q ? scale : (scale >> 1);
-          const valExpr = decoded.elemSize === 3 ? regExpr(decoded.rn) : `Number(${regExpr(decoded.rn)} & 0xffffffffn)`;
+          const valExpr = elemSize === 3 ? regExpr(decoded.rn) : `Number(${regExpr(decoded.rn)} & 0xffffffffn)`;
           for (let l = 0; l < maxLanes; l++) {
             lines.push(`${arr}[${decoded.rd} * ${scale} + ${l}] = ${valExpr};`);
           }
@@ -1200,11 +1265,13 @@ export class JitCompiler {
         }
 
         case InstructionType.DUP_ELEM: {
-          const arr = decoded.elemSize === 0 ? "vBytes" : decoded.elemSize === 1 ? "vUint16" : decoded.elemSize === 2 ? "vUint32" : "vUint64";
-          const scale = 16 >> decoded.elemSize;
+          const elemSize = decoded.size ?? decoded.elemSize;
+          const arr = elemSize === 0 ? "vBytes" : elemSize === 1 ? "vUint16" : elemSize === 2 ? "vUint32" : "vUint64";
+          const scale = 16 >> elemSize;
           const maxLanes = decoded.Q ? scale : (scale >> 1);
+          const lane = decoded.lane ?? decoded.index ?? 0;
           lines.push(`{`);
-          lines.push(`  const elem = ${arr}[${decoded.rn} * ${scale} + ${decoded.index}];`);
+          lines.push(`  const elem = ${arr}[${decoded.rn} * ${scale} + ${lane}];`);
           for (let l = 0; l < maxLanes; l++) {
             lines.push(`  ${arr}[${decoded.rd} * ${scale} + ${l}] = elem;`);
           }
@@ -1216,24 +1283,27 @@ export class JitCompiler {
         }
 
         case InstructionType.INS_GEN: {
-          const arr = decoded.elemSize === 0 ? "vBytes" : decoded.elemSize === 1 ? "vUint16" : decoded.elemSize === 2 ? "vUint32" : "vUint64";
-          const scale = 16 >> decoded.elemSize;
-          const valExpr = decoded.elemSize === 3 ? regExpr(decoded.rn) : `Number(${regExpr(decoded.rn)} & 0xffffffffn)`;
+          const elemSize = decoded.size ?? decoded.elemSize;
+          const arr = elemSize === 0 ? "vBytes" : elemSize === 1 ? "vUint16" : elemSize === 2 ? "vUint32" : "vUint64";
+          const scale = 16 >> elemSize;
+          const valExpr = elemSize === 3 ? regExpr(decoded.rn) : `Number(${regExpr(decoded.rn)} & 0xffffffffn)`;
           lines.push(`${arr}[${decoded.rd} * ${scale} + ${decoded.lane}] = ${valExpr};`);
           break;
         }
 
         case InstructionType.INS_ELEM: {
-          const arr = decoded.elemSize === 0 ? "vBytes" : decoded.elemSize === 1 ? "vUint16" : decoded.elemSize === 2 ? "vUint32" : "vUint64";
-          const scale = 16 >> decoded.elemSize;
+          const elemSize = decoded.size ?? decoded.elemSize;
+          const arr = elemSize === 0 ? "vBytes" : elemSize === 1 ? "vUint16" : elemSize === 2 ? "vUint32" : "vUint64";
+          const scale = 16 >> elemSize;
           lines.push(`${arr}[${decoded.rd} * ${scale} + ${decoded.dstLane}] = ${arr}[${decoded.rn} * ${scale} + ${decoded.srcLane}];`);
           break;
         }
 
         case InstructionType.UMOV_ELEM: {
           if (decoded.rd !== 31) {
-            const arr = decoded.elemSize === 0 ? "vBytes" : decoded.elemSize === 1 ? "vUint16" : decoded.elemSize === 2 ? "vUint32" : "vUint64";
-            const scale = 16 >> decoded.elemSize;
+            const elemSize = decoded.size ?? decoded.elemSize;
+            const arr = elemSize === 0 ? "vBytes" : elemSize === 1 ? "vUint16" : elemSize === 2 ? "vUint32" : "vUint64";
+            const scale = 16 >> elemSize;
             lines.push(`x[${decoded.rd}] = BigInt(${arr}[${decoded.rn} * ${scale} + ${decoded.lane}]);`);
           }
           break;

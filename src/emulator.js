@@ -29,6 +29,7 @@ export class MiniQEMU {
     this.mmapRegions = new Map();
     this.onRead = null;
     this.stdinQueue = [];
+    this.lastYielded = false;
 
     // Dynamic Just-In-Time (JIT) Compilation Engine
     this.jitEnabled = options.jitEnabled ?? true;
@@ -133,6 +134,7 @@ export class MiniQEMU {
 
   addBreakpoint(addr) {
     this.breakpoints.add(Number(addr));
+    this.jit?.invalidateRange(Number(addr), 4);
   }
 
   removeBreakpoint(addr) {
@@ -143,9 +145,11 @@ export class MiniQEMU {
     const a = Number(addr);
     if (this.breakpoints.has(a)) {
       this.breakpoints.delete(a);
+      this.jit?.invalidateRange(a, 4);
       return false;
     } else {
       this.breakpoints.add(a);
+      this.jit?.invalidateRange(a, 4);
       return true;
     }
   }
@@ -433,6 +437,319 @@ export class MiniQEMU {
       default:
         throw new Error(`Unsupported condition code: ${cond}`);
     }
+  }
+
+  handleSyscall(imm16 = 0) {
+    const syscallNum = Number(this.cpu.getReg(8));
+    let isYield = false;
+
+    if (syscallNum === 93 || syscallNum === 94) { // sys_exit (93) / sys_exit_group (94)
+      this.cpu.exitCode = Number(this.cpu.getReg(0));
+      this.cpu.halted = true;
+      if (this.onHalt) {
+        this.onHalt(this.cpu.exitCode);
+      }
+    } else if (syscallNum === 17) { // sys_getcwd(buf, size)
+      const bufAddr = Number(this.cpu.getReg(0));
+      const size = Number(this.cpu.getReg(1));
+      const cwdBytes = new TextEncoder().encode(this.cwd + "\0");
+      if (size < cwdBytes.length) {
+        this.cpu.setReg(0, BigInt.asUintN(64, -34n)); // -ERANGE
+      } else {
+        for (let i = 0; i < cwdBytes.length; i++) {
+          this.memory.write8(bufAddr + i, cwdBytes[i]);
+        }
+        this.cpu.setReg(0, BigInt(bufAddr));
+      }
+    } else if (syscallNum === 35) { // sys_unlinkat(dirfd, pathname, flags)
+      const pathAddr = Number(this.cpu.getReg(1));
+      const key = this.normalizeVfsPath(this.readGuestCString(pathAddr));
+      if (this.vfs.has(key)) {
+        this.vfs.delete(key);
+        this.cpu.setReg(0, 0n);
+      } else {
+        this.cpu.setReg(0, BigInt.asUintN(64, -2n)); // -ENOENT
+      }
+    } else if (syscallNum === 56) { // sys_openat(dirfd, pathname, flags, mode)
+      const pathAddr = Number(this.cpu.getReg(1));
+      const flags = Number(this.cpu.getReg(2));
+      const key = this.normalizeVfsPath(this.readGuestCString(pathAddr));
+
+      // Linux AArch64 open flags: O_ACCMODE=3 (0=RDONLY, 1=WRONLY, 2=RDWR), O_CREAT=0x40, O_TRUNC=0x200, O_APPEND=0x400
+      const accMode = flags & 0x3;
+      const isCreat = (flags & 0x40) !== 0;
+      const isTrunc = (flags & 0x200) !== 0;
+      const isAppend = (flags & 0x400) !== 0;
+      const writable = (accMode === 1 || accMode === 2);
+
+      let existing = this.vfs.get(key);
+      if (!existing && !isCreat) {
+        this.cpu.setReg(0, BigInt.asUintN(64, -2n)); // -ENOENT
+      } else {
+        const data = (!existing || isTrunc) ? new Uint8Array(0) : new Uint8Array(existing);
+        this.vfs.set(key, new Uint8Array(data));
+        const fd = this.nextFd++;
+        this.fds.set(fd, {
+          path: key,
+          data,
+          pos: isAppend ? data.length : 0,
+          flags,
+          writable,
+          append: isAppend,
+        });
+        this.cpu.setReg(0, BigInt(fd));
+      }
+    } else if (syscallNum === 57) { // sys_close(fd)
+      const fd = Number(this.cpu.getReg(0));
+      if (fd >= 0 && fd <= 2) {
+        this.cpu.setReg(0, 0n);
+      } else if (this.fds.has(fd)) {
+        const desc = this.fds.get(fd);
+        if (desc.writable) {
+          this.vfs.set(desc.path, new Uint8Array(desc.data));
+        }
+        this.fds.delete(fd);
+        this.cpu.setReg(0, 0n);
+      } else {
+        this.cpu.setReg(0, BigInt.asUintN(64, -9n)); // -EBADF
+      }
+    } else if (syscallNum === 62) { // sys_lseek(fd, offset, whence)
+      const fd = Number(this.cpu.getReg(0));
+      const offset = Number(BigInt.asIntN(64, this.cpu.getReg(1)));
+      const whence = Number(this.cpu.getReg(2)); // 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END
+      const desc = this.fds.get(fd);
+      if (!desc) {
+        this.cpu.setReg(0, BigInt.asUintN(64, -9n)); // -EBADF
+      } else {
+        let newPos = desc.pos;
+        if (whence === 0) newPos = offset;
+        else if (whence === 1) newPos = desc.pos + offset;
+        else if (whence === 2) newPos = desc.data.length + offset;
+        else {
+          this.cpu.setReg(0, BigInt.asUintN(64, -22n)); // -EINVAL
+          newPos = null;
+        }
+        if (newPos !== null) {
+          if (newPos < 0) {
+            this.cpu.setReg(0, BigInt.asUintN(64, -22n)); // -EINVAL
+          } else {
+            desc.pos = newPos;
+            this.cpu.setReg(0, BigInt(newPos));
+          }
+        }
+      }
+    } else if (syscallNum === 64) { // sys_write(fd, buf, count)
+      const fd = Number(this.cpu.getReg(0));
+      const bufAddr = Number(this.cpu.getReg(1));
+      const count = Number(this.cpu.getReg(2));
+
+      const bytes = new Uint8Array(count);
+      for (let i = 0; i < count; i++) {
+        bytes[i] = this.memory.read8(bufAddr + i);
+      }
+      const written = this.writeBytesToFd(fd, bytes);
+      this.cpu.setReg(0, BigInt.asUintN(64, BigInt(written)));
+    } else if (syscallNum === 66) { // sys_writev(fd, iov, iovcnt) - scatter/gather I/O used by musl/glibc printf
+      const fd = Number(this.cpu.getReg(0));
+      const iovAddr = Number(this.cpu.getReg(1));
+      const iovcnt = Number(this.cpu.getReg(2));
+
+      let totalWritten = 0;
+      for (let v = 0; v < iovcnt; v++) {
+        const entryAddr = iovAddr + v * 16;
+        const basePtr = Number(this.memory.read64(entryAddr));
+        const len = Number(this.memory.read64(entryAddr + 8));
+        if (len > 0) {
+          const bytes = new Uint8Array(len);
+          for (let i = 0; i < len; i++) {
+            bytes[i] = this.memory.read8(basePtr + i);
+          }
+          const res = this.writeBytesToFd(fd, bytes);
+          if (res < 0) {
+            totalWritten = res;
+            break;
+          }
+          totalWritten += res;
+        }
+      }
+      this.cpu.setReg(0, BigInt.asUintN(64, BigInt(totalWritten)));
+    } else if (syscallNum === 63) { // sys_read(fd, buf, count)
+      const fd = Number(this.cpu.getReg(0));
+      const bufAddr = Number(this.cpu.getReg(1));
+      const count = Number(this.cpu.getReg(2));
+
+      if (fd === 0) { // stdin
+        let bytesRead = 0;
+        if (this.onRead) {
+          const res = this.onRead(count);
+          if (res) {
+            const bytes = typeof res === "string" ? new TextEncoder().encode(res) : res;
+            for (let i = 0; i < Math.min(count, bytes.length); i++) {
+              this.memory.write8(bufAddr + i, bytes[i]);
+              bytesRead++;
+            }
+          }
+        } else if (this.stdinQueue.length > 0) {
+          while (bytesRead < count && this.stdinQueue.length > 0) {
+            this.memory.write8(bufAddr + bytesRead, this.stdinQueue.shift());
+            bytesRead++;
+          }
+        }
+        this.cpu.setReg(0, BigInt(bytesRead));
+      } else if (this.fds.has(fd)) {
+        const desc = this.fds.get(fd);
+        const avail = Math.max(0, desc.data.length - desc.pos);
+        const toRead = Math.min(count, avail);
+        for (let i = 0; i < toRead; i++) {
+          this.memory.write8(bufAddr + i, desc.data[desc.pos + i]);
+        }
+        desc.pos += toRead;
+        this.cpu.setReg(0, BigInt(toRead));
+      } else {
+        // Unsupported fd, return -EBADF (9)
+        this.cpu.setReg(0, BigInt.asUintN(64, -9n));
+      }
+    } else if (syscallNum === 214) { // sys_brk(brk)
+      const requestedBrk = this.cpu.getReg(0);
+      if (requestedBrk === 0n || requestedBrk < this.heapStart) {
+        // Return current program break
+        this.cpu.setReg(0, this.brk);
+      } else {
+        if (requestedBrk < this.brk) {
+          // Contraction: free pages between requestedBrk and this.brk
+          const shrinkLen = Number(this.brk - requestedBrk);
+          this.memory.freeRange(Number(requestedBrk), shrinkLen);
+          this.jit?.invalidateRange(Number(requestedBrk), shrinkLen);
+        }
+        // Expand or update heap to requested address
+        this.brk = requestedBrk;
+        this.cpu.setReg(0, this.brk);
+      }
+    } else if (syscallNum === 222) { // sys_mmap(addr, length, prot, flags, fd, offset)
+      const addr = this.cpu.getReg(0);
+      const len = this.cpu.getReg(1);
+      const prot = Number(this.cpu.getReg(2));
+      const flags = Number(this.cpu.getReg(3));
+      const fd = Number(BigInt.asIntN(32, this.cpu.getReg(4)));
+      const offset = Number(this.cpu.getReg(5));
+      // Allocate page-aligned chunk from mmap space
+      const alignedLen = (len + 4095n) & ~4095n;
+      let allocAddr = addr;
+      if (allocAddr === 0n) {
+        allocAddr = this.mmapCurrent;
+        this.mmapCurrent += alignedLen;
+      }
+      const numAllocAddr = Number(allocAddr);
+      // Populate mapped pages if file-backed (fd >= 0 in VFS table)
+      if (fd >= 0 && this.fds.has(fd)) {
+        const desc = this.fds.get(fd);
+        const avail = Math.max(0, desc.data.length - offset);
+        const copyLen = Math.min(Number(len), avail);
+        for (let i = 0; i < copyLen; i++) {
+          this.memory.write8(numAllocAddr + i, desc.data[offset + i]);
+        }
+      }
+      this.mmapRegions.set(numAllocAddr, {
+        addr: numAllocAddr,
+        len: Number(alignedLen),
+        prot,
+        flags,
+        fd,
+        offset
+      });
+      this.cpu.setReg(0, allocAddr);
+    } else if (syscallNum === 215) { // sys_munmap(addr, length)
+      const addr = Number(this.cpu.getReg(0));
+      const len = Number(this.cpu.getReg(1));
+      const alignedLen = (len + 4095) & ~4095;
+      this.memory.freeRange(addr, alignedLen);
+      this.jit?.invalidateRange(addr, alignedLen);
+      if (this.mmapRegions.has(addr)) {
+        const region = this.mmapRegions.get(addr);
+        if (alignedLen >= region.len) {
+          this.mmapRegions.delete(addr);
+        } else {
+          // Shrink region if only the leading portion was unmapped
+          this.mmapRegions.delete(addr);
+          this.mmapRegions.set(addr + alignedLen, {
+            ...region,
+            addr: addr + alignedLen,
+            len: region.len - alignedLen
+          });
+        }
+      }
+      this.cpu.setReg(0, 0n);
+    } else if (syscallNum === 226) { // sys_mprotect
+      this.cpu.setReg(0, 0n);
+    } else if (syscallNum === 113) { // sys_clock_gettime(clk_id, tp)
+      const tpAddr = Number(this.cpu.getReg(1));
+      const nowMs = Date.now();
+      const sec = BigInt(Math.floor(nowMs / 1000));
+      const nsec = BigInt((nowMs % 1000) * 1_000_000);
+      this.memory.write64(tpAddr, sec);
+      this.memory.write64(tpAddr + 8, nsec);
+      this.cpu.setReg(0, 0n);
+    } else if (syscallNum === 160) { // sys_uname(buf)
+      const bufAddr = Number(this.cpu.getReg(0));
+      const writeField = (offset, text) => {
+        const bytes = new TextEncoder().encode(text);
+        for (let i = 0; i < 64; i++) {
+          this.memory.write8(bufAddr + offset + i, i < bytes.length ? bytes[i] : 0);
+        }
+        this.memory.write8(bufAddr + offset + 64, 0);
+      };
+      writeField(0, "Linux");
+      writeField(65, "mini-qemu");
+      writeField(130, "6.1.0-mini-qemu");
+      writeField(195, "#1 SMP Mini-QEMU");
+      writeField(260, "aarch64");
+      this.cpu.setReg(0, 0n);
+    } else if (syscallNum === 96 || syscallNum === 172 || syscallNum === 178) { // set_tid_address (96), getpid (172), gettid (178)
+      this.cpu.setReg(0, 1000n);
+    } else if (syscallNum === 278) { // sys_getrandom(buf, buflen, flags)
+      const bufAddr = Number(this.cpu.getReg(0));
+      const buflen = Number(this.cpu.getReg(1));
+      for (let i = 0; i < buflen; i++) {
+        this.memory.write8(bufAddr + i, ((i * 37) ^ 0x5c) & 0xff);
+      }
+      this.cpu.setReg(0, BigInt(buflen));
+    } else if (syscallNum === 80) { // sys_fstat(fd, statbuf)
+      const fd = Number(this.cpu.getReg(0));
+      const statBufAddr = Number(this.cpu.getReg(1));
+      if (fd >= 0 && fd <= 2) {
+        if (statBufAddr > 0) this.writeGuestStatStruct(statBufAddr, 0, true);
+        this.cpu.setReg(0, 0n);
+      } else if (this.fds.has(fd)) {
+        const desc = this.fds.get(fd);
+        if (statBufAddr > 0) this.writeGuestStatStruct(statBufAddr, desc.data.length, false);
+        this.cpu.setReg(0, 0n);
+      } else {
+        this.cpu.setReg(0, BigInt.asUintN(64, -9n)); // -EBADF
+      }
+    } else if (syscallNum === 79) { // sys_newfstatat(dirfd, pathname, statbuf, flags)
+      const pathAddr = Number(this.cpu.getReg(1));
+      const statBufAddr = Number(this.cpu.getReg(2));
+      const key = this.normalizeVfsPath(this.readGuestCString(pathAddr));
+      if (this.vfs.has(key)) {
+        const data = this.vfs.get(key);
+        if (statBufAddr > 0) this.writeGuestStatStruct(statBufAddr, data.length, false);
+        this.cpu.setReg(0, 0n);
+      } else {
+        this.cpu.setReg(0, BigInt.asUintN(64, -2n)); // -ENOENT
+      }
+    } else if (syscallNum === 124) { // sys_sched_yield
+      const curFrames = this.memory.read32(INPUT_REG_FRAME_COUNT);
+      this.memory.write32(INPUT_REG_FRAME_COUNT, (curFrames + 1) >>> 0);
+      this.cpu.setReg(0, 0n);
+      isYield = true;
+    } else if (syscallNum === 29 || syscallNum === 25) { // sys_ioctl (29), sys_fcntl (25)
+      this.cpu.setReg(0, 0n);
+    } else {
+      throw new Error(`Unimplemented syscall number: ${syscallNum}`);
+    }
+
+    this.lastYielded = isYield;
+    return { yielded: isYield, halted: this.cpu.halted };
   }
 
   // Execute one cycle: Fetch -> Decode -> Execute
@@ -975,311 +1292,8 @@ export class MiniQEMU {
 
       // --- Syscalls ---
       case InstructionType.SVC: {
-        const syscallNum = Number(this.cpu.getReg(8));
-
-        if (syscallNum === 93 || syscallNum === 94) { // sys_exit (93) / sys_exit_group (94)
-          this.cpu.exitCode = Number(this.cpu.getReg(0));
-          this.cpu.halted = true;
-          if (this.onHalt) {
-            this.onHalt(this.cpu.exitCode);
-          }
-        } else if (syscallNum === 17) { // sys_getcwd(buf, size)
-          const bufAddr = Number(this.cpu.getReg(0));
-          const size = Number(this.cpu.getReg(1));
-          const cwdBytes = new TextEncoder().encode(this.cwd + "\0");
-          if (size < cwdBytes.length) {
-            this.cpu.setReg(0, BigInt.asUintN(64, -34n)); // -ERANGE
-          } else {
-            for (let i = 0; i < cwdBytes.length; i++) {
-              this.memory.write8(bufAddr + i, cwdBytes[i]);
-            }
-            this.cpu.setReg(0, BigInt(bufAddr));
-          }
-        } else if (syscallNum === 35) { // sys_unlinkat(dirfd, pathname, flags)
-          const pathAddr = Number(this.cpu.getReg(1));
-          const key = this.normalizeVfsPath(this.readGuestCString(pathAddr));
-          if (this.vfs.has(key)) {
-            this.vfs.delete(key);
-            this.cpu.setReg(0, 0n);
-          } else {
-            this.cpu.setReg(0, BigInt.asUintN(64, -2n)); // -ENOENT
-          }
-        } else if (syscallNum === 56) { // sys_openat(dirfd, pathname, flags, mode)
-          const pathAddr = Number(this.cpu.getReg(1));
-          const flags = Number(this.cpu.getReg(2));
-          const key = this.normalizeVfsPath(this.readGuestCString(pathAddr));
-
-          // Linux AArch64 open flags: O_ACCMODE=3 (0=RDONLY, 1=WRONLY, 2=RDWR), O_CREAT=0x40, O_TRUNC=0x200, O_APPEND=0x400
-          const accMode = flags & 0x3;
-          const isCreat = (flags & 0x40) !== 0;
-          const isTrunc = (flags & 0x200) !== 0;
-          const isAppend = (flags & 0x400) !== 0;
-          const writable = (accMode === 1 || accMode === 2);
-
-          let existing = this.vfs.get(key);
-          if (!existing && !isCreat) {
-            this.cpu.setReg(0, BigInt.asUintN(64, -2n)); // -ENOENT
-          } else {
-            const data = (!existing || isTrunc) ? new Uint8Array(0) : new Uint8Array(existing);
-            this.vfs.set(key, new Uint8Array(data));
-            const fd = this.nextFd++;
-            this.fds.set(fd, {
-              path: key,
-              data,
-              pos: isAppend ? data.length : 0,
-              flags,
-              writable,
-              append: isAppend,
-            });
-            this.cpu.setReg(0, BigInt(fd));
-          }
-        } else if (syscallNum === 57) { // sys_close(fd)
-          const fd = Number(this.cpu.getReg(0));
-          if (fd >= 0 && fd <= 2) {
-            this.cpu.setReg(0, 0n);
-          } else if (this.fds.has(fd)) {
-            const desc = this.fds.get(fd);
-            if (desc.writable) {
-              this.vfs.set(desc.path, new Uint8Array(desc.data));
-            }
-            this.fds.delete(fd);
-            this.cpu.setReg(0, 0n);
-          } else {
-            this.cpu.setReg(0, BigInt.asUintN(64, -9n)); // -EBADF
-          }
-        } else if (syscallNum === 62) { // sys_lseek(fd, offset, whence)
-          const fd = Number(this.cpu.getReg(0));
-          const offset = Number(BigInt.asIntN(64, this.cpu.getReg(1)));
-          const whence = Number(this.cpu.getReg(2)); // 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END
-          const desc = this.fds.get(fd);
-          if (!desc) {
-            this.cpu.setReg(0, BigInt.asUintN(64, -9n)); // -EBADF
-          } else {
-            let newPos = desc.pos;
-            if (whence === 0) newPos = offset;
-            else if (whence === 1) newPos = desc.pos + offset;
-            else if (whence === 2) newPos = desc.data.length + offset;
-            else {
-              this.cpu.setReg(0, BigInt.asUintN(64, -22n)); // -EINVAL
-              this.cpu.pc += 4n;
-              break;
-            }
-            if (newPos < 0) {
-              this.cpu.setReg(0, BigInt.asUintN(64, -22n)); // -EINVAL
-            } else {
-              desc.pos = newPos;
-              this.cpu.setReg(0, BigInt(newPos));
-            }
-          }
-        } else if (syscallNum === 64) { // sys_write(fd, buf, count)
-          const fd = Number(this.cpu.getReg(0));
-          const bufAddr = Number(this.cpu.getReg(1));
-          const count = Number(this.cpu.getReg(2));
-
-          const bytes = new Uint8Array(count);
-          for (let i = 0; i < count; i++) {
-            bytes[i] = this.memory.read8(bufAddr + i);
-          }
-          const written = this.writeBytesToFd(fd, bytes);
-          this.cpu.setReg(0, BigInt.asUintN(64, BigInt(written)));
-        } else if (syscallNum === 66) { // sys_writev(fd, iov, iovcnt) - scatter/gather I/O used by musl/glibc printf
-          const fd = Number(this.cpu.getReg(0));
-          const iovAddr = Number(this.cpu.getReg(1));
-          const iovcnt = Number(this.cpu.getReg(2));
-
-          let totalWritten = 0;
-          for (let v = 0; v < iovcnt; v++) {
-            const entryAddr = iovAddr + v * 16;
-            const basePtr = Number(this.memory.read64(entryAddr));
-            const len = Number(this.memory.read64(entryAddr + 8));
-            if (len > 0) {
-              const bytes = new Uint8Array(len);
-              for (let i = 0; i < len; i++) {
-                bytes[i] = this.memory.read8(basePtr + i);
-              }
-              const res = this.writeBytesToFd(fd, bytes);
-              if (res < 0) {
-                totalWritten = res;
-                break;
-              }
-              totalWritten += res;
-            }
-          }
-          this.cpu.setReg(0, BigInt.asUintN(64, BigInt(totalWritten)));
-        } else if (syscallNum === 63) { // sys_read(fd, buf, count)
-          const fd = Number(this.cpu.getReg(0));
-          const bufAddr = Number(this.cpu.getReg(1));
-          const count = Number(this.cpu.getReg(2));
-
-          if (fd === 0) { // stdin
-            let bytesRead = 0;
-            if (this.onRead) {
-              const res = this.onRead(count);
-              if (res) {
-                const bytes = typeof res === "string" ? new TextEncoder().encode(res) : res;
-                for (let i = 0; i < Math.min(count, bytes.length); i++) {
-                  this.memory.write8(bufAddr + i, bytes[i]);
-                  bytesRead++;
-                }
-              }
-            } else if (this.stdinQueue.length > 0) {
-              while (bytesRead < count && this.stdinQueue.length > 0) {
-                this.memory.write8(bufAddr + bytesRead, this.stdinQueue.shift());
-                bytesRead++;
-              }
-            }
-            this.cpu.setReg(0, BigInt(bytesRead));
-          } else if (this.fds.has(fd)) {
-            const desc = this.fds.get(fd);
-            const avail = Math.max(0, desc.data.length - desc.pos);
-            const toRead = Math.min(count, avail);
-            for (let i = 0; i < toRead; i++) {
-              this.memory.write8(bufAddr + i, desc.data[desc.pos + i]);
-            }
-            desc.pos += toRead;
-            this.cpu.setReg(0, BigInt(toRead));
-          } else {
-            // Unsupported fd, return -EBADF (9)
-            this.cpu.setReg(0, BigInt.asUintN(64, -9n));
-          }
-        } else if (syscallNum === 214) { // sys_brk(brk)
-          const requestedBrk = this.cpu.getReg(0);
-          if (requestedBrk === 0n || requestedBrk < this.heapStart) {
-            // Return current program break
-            this.cpu.setReg(0, this.brk);
-          } else {
-            if (requestedBrk < this.brk) {
-              // Contraction: free pages between requestedBrk and this.brk
-              const shrinkLen = Number(this.brk - requestedBrk);
-              this.memory.freeRange(Number(requestedBrk), shrinkLen);
-              this.jit?.invalidateRange(Number(requestedBrk), shrinkLen);
-            }
-            // Expand or update heap to requested address
-            this.brk = requestedBrk;
-            this.cpu.setReg(0, this.brk);
-          }
-        } else if (syscallNum === 222) { // sys_mmap(addr, length, prot, flags, fd, offset)
-          const addr = this.cpu.getReg(0);
-          const len = this.cpu.getReg(1);
-          const prot = Number(this.cpu.getReg(2));
-          const flags = Number(this.cpu.getReg(3));
-          const fd = Number(BigInt.asIntN(32, this.cpu.getReg(4)));
-          const offset = Number(this.cpu.getReg(5));
-          // Allocate page-aligned chunk from mmap space
-          const alignedLen = (len + 4095n) & ~4095n;
-          let allocAddr = addr;
-          if (allocAddr === 0n) {
-            allocAddr = this.mmapCurrent;
-            this.mmapCurrent += alignedLen;
-          }
-          const numAllocAddr = Number(allocAddr);
-          // Populate mapped pages if file-backed (fd >= 0 in VFS table)
-          if (fd >= 0 && this.fds.has(fd)) {
-            const desc = this.fds.get(fd);
-            const avail = Math.max(0, desc.data.length - offset);
-            const copyLen = Math.min(Number(len), avail);
-            for (let i = 0; i < copyLen; i++) {
-              this.memory.write8(numAllocAddr + i, desc.data[offset + i]);
-            }
-          }
-          this.mmapRegions.set(numAllocAddr, {
-            addr: numAllocAddr,
-            len: Number(alignedLen),
-            prot,
-            flags,
-            fd,
-            offset
-          });
-          this.cpu.setReg(0, allocAddr);
-        } else if (syscallNum === 215) { // sys_munmap(addr, length)
-          const addr = Number(this.cpu.getReg(0));
-          const len = Number(this.cpu.getReg(1));
-          const alignedLen = (len + 4095) & ~4095;
-          this.memory.freeRange(addr, alignedLen);
-          this.jit?.invalidateRange(addr, alignedLen);
-          if (this.mmapRegions.has(addr)) {
-            const region = this.mmapRegions.get(addr);
-            if (alignedLen >= region.len) {
-              this.mmapRegions.delete(addr);
-            } else {
-              // Shrink region if only the leading portion was unmapped
-              this.mmapRegions.delete(addr);
-              this.mmapRegions.set(addr + alignedLen, {
-                ...region,
-                addr: addr + alignedLen,
-                len: region.len - alignedLen
-              });
-            }
-          }
-          this.cpu.setReg(0, 0n);
-        } else if (syscallNum === 226) { // sys_mprotect
-          this.cpu.setReg(0, 0n);
-        } else if (syscallNum === 113) { // sys_clock_gettime(clk_id, tp)
-          const tpAddr = Number(this.cpu.getReg(1));
-          const nowMs = Date.now();
-          const sec = BigInt(Math.floor(nowMs / 1000));
-          const nsec = BigInt((nowMs % 1000) * 1_000_000);
-          this.memory.write64(tpAddr, sec);
-          this.memory.write64(tpAddr + 8, nsec);
-          this.cpu.setReg(0, 0n);
-        } else if (syscallNum === 160) { // sys_uname(buf)
-          const bufAddr = Number(this.cpu.getReg(0));
-          const writeField = (offset, text) => {
-            const bytes = new TextEncoder().encode(text);
-            for (let i = 0; i < 64; i++) {
-              this.memory.write8(bufAddr + offset + i, i < bytes.length ? bytes[i] : 0);
-            }
-            this.memory.write8(bufAddr + offset + 64, 0);
-          };
-          writeField(0, "Linux");
-          writeField(65, "mini-qemu");
-          writeField(130, "6.1.0-mini-qemu");
-          writeField(195, "#1 SMP Mini-QEMU");
-          writeField(260, "aarch64");
-          this.cpu.setReg(0, 0n);
-        } else if (syscallNum === 96 || syscallNum === 172 || syscallNum === 178) { // set_tid_address (96), getpid (172), gettid (178)
-          this.cpu.setReg(0, 1000n);
-        } else if (syscallNum === 278) { // sys_getrandom(buf, buflen, flags)
-          const bufAddr = Number(this.cpu.getReg(0));
-          const buflen = Number(this.cpu.getReg(1));
-          for (let i = 0; i < buflen; i++) {
-            this.memory.write8(bufAddr + i, ((i * 37) ^ 0x5c) & 0xff);
-          }
-          this.cpu.setReg(0, BigInt(buflen));
-        } else if (syscallNum === 80) { // sys_fstat(fd, statbuf)
-          const fd = Number(this.cpu.getReg(0));
-          const statBufAddr = Number(this.cpu.getReg(1));
-          if (fd >= 0 && fd <= 2) {
-            if (statBufAddr > 0) this.writeGuestStatStruct(statBufAddr, 0, true);
-            this.cpu.setReg(0, 0n);
-          } else if (this.fds.has(fd)) {
-            const desc = this.fds.get(fd);
-            if (statBufAddr > 0) this.writeGuestStatStruct(statBufAddr, desc.data.length, false);
-            this.cpu.setReg(0, 0n);
-          } else {
-            this.cpu.setReg(0, BigInt.asUintN(64, -9n)); // -EBADF
-          }
-        } else if (syscallNum === 79) { // sys_newfstatat(dirfd, pathname, statbuf, flags)
-          const pathAddr = Number(this.cpu.getReg(1));
-          const statBufAddr = Number(this.cpu.getReg(2));
-          const key = this.normalizeVfsPath(this.readGuestCString(pathAddr));
-          if (this.vfs.has(key)) {
-            const data = this.vfs.get(key);
-            if (statBufAddr > 0) this.writeGuestStatStruct(statBufAddr, data.length, false);
-            this.cpu.setReg(0, 0n);
-          } else {
-            this.cpu.setReg(0, BigInt.asUintN(64, -2n)); // -ENOENT
-          }
-        } else if (syscallNum === 124) { // sys_sched_yield
-          const curFrames = this.memory.read32(INPUT_REG_FRAME_COUNT);
-          this.memory.write32(INPUT_REG_FRAME_COUNT, (curFrames + 1) >>> 0);
-          this.cpu.setReg(0, 0n);
-          isYield = true;
-        } else if (syscallNum === 29 || syscallNum === 25) { // sys_ioctl (29), sys_fcntl (25)
-          this.cpu.setReg(0, 0n);
-        } else {
-          throw new Error(`Unimplemented syscall number: ${syscallNum}`);
-        }
+        const sysRes = this.handleSyscall(decoded.imm16);
+        isYield = sysRes.yielded;
         this.cpu.pc += 4n;
         break;
       }
@@ -1934,7 +1948,7 @@ export class MiniQEMU {
     }));
   }
 
-  runJit(maxCycles = 10000) {
+  runJit(maxCycles = 10000, stopOnYield = false) {
     while (!this.cpu.halted && this.cycleCount < maxCycles) {
       const curPC = Number(this.cpu.pc);
       if (this.breakpoints.has(curPC)) {
@@ -1944,22 +1958,28 @@ export class MiniQEMU {
       let block = this.jit.getBlock(curPC);
       if (!block) {
         if (this.jit.recordEntry(curPC)) {
-          block = this.jit.compileBlock(curPC, this.memory);
+          block = this.jit.compileBlock(curPC, this.memory, this.breakpoints);
         }
       }
 
       if (block) {
+        this.lastYielded = false;
         const executed = block.fn(this.cpu, this.memory, this);
+        if (executed === 0) {
+          const res = this.step(false);
+          if (res.hitBreakpoint || res.halted || (stopOnYield && res.yielded)) break;
+          continue;
+        }
         this.cycleCount += executed;
         this.jit.stats.blockExecutions++;
         this.jit.stats.jitCycles += executed;
         block.execCount++;
-        if (this.cpu.halted) break;
+        if (this.cpu.halted || (stopOnYield && this.lastYielded)) break;
         const nextPC = Number(this.cpu.pc);
         if (this.breakpoints.has(nextPC)) break;
       } else {
         const res = this.step(false);
-        if (res.hitBreakpoint || res.halted || res.yielded) break;
+        if (res.hitBreakpoint || res.halted || (stopOnYield && res.yielded)) break;
       }
     }
     return this.cpu.exitCode;

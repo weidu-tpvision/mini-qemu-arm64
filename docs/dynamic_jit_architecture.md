@@ -145,16 +145,16 @@ Mini-QEMU includes an automated verification suite in [`tests/test_jit.js`](file
 ### 5.1 Bit-Exact Equivalence
 Across all 8 standard guest ELF binaries, the JIT output matches the interpreter bit-for-bit:
 
-| Binary | Description | Verification Status | JIT Coverage |
-| :--- | :--- | :---: | :---: |
-| `bin/fib.elf` | Iterative Fibonacci loop | ✅ Bit-Exact | 72.7% |
-| `bin/fib_rec.elf` | Deep recursive call tree & stack frames | ✅ Bit-Exact | 97.7% |
-| `bin/math_func.elf` | Subroutine calls, 64-bit div/mul | ✅ Bit-Exact | 100% |
-| `bin/heap_demo.elf` | Heap expansion via `sys_brk` | ✅ Bit-Exact | 100% |
-| `bin/dynamic_memory.elf` | Boundary-tag malloc/free & coalescing | ✅ Bit-Exact | 100% |
-| `bin/neon_matrix.elf` | VFP scalar magnitude & NEON 4S SIMD dot product | ✅ Bit-Exact | 100% |
-| `bin/graphics_pattern.elf`| 320×240 SMPTE color bars & RGB gradients | ✅ Bit-Exact | 100% |
-| `bin/plasma.elf` | Procedural 320×240 demoscene plasma | ✅ Bit-Exact | 100% |
+| Binary | Description | Verification Status | Default JIT Coverage (`hotThreshold = 3`) | Hot-Compiled JIT Coverage (`hotThreshold = 1`) |
+| :--- | :--- | :---: | :---: | :---: |
+| `bin/fib.elf` | Iterative Fibonacci loop | ✅ Bit-Exact | 72.7% (1 block) | 100% (3 blocks) |
+| `bin/fib_rec.elf` | Deep recursive call tree & stack frames | ✅ Bit-Exact | 97.7% (5 blocks) | 100% (7 blocks) |
+| `bin/math_func.elf` | Subroutine calls, 64-bit div/mul | ✅ Bit-Exact | 0.0% (single pass) | 100% (3 blocks) |
+| `bin/heap_demo.elf` | Heap expansion via `sys_brk` | ✅ Bit-Exact | 0.0% (single pass) | 100% (4 blocks) |
+| `bin/dynamic_memory.elf` | Boundary-tag malloc/free & coalescing | ✅ Bit-Exact | 0.0% (single pass) | 100% (6 blocks) |
+| `bin/neon_matrix.elf` | VFP scalar magnitude & NEON 4S SIMD dot product | ✅ Bit-Exact | 0.0% (single pass) | 100% (2 blocks) |
+| `bin/graphics_pattern.elf`| 320×240 SMPTE color bars & RGB gradients | ✅ Bit-Exact | 100.0% (8 blocks) | 100% (12 blocks) |
+| `bin/plasma.elf` | Procedural 320×240 demoscene plasma | ✅ Bit-Exact | 100.0% (3 blocks) | 100% (6 blocks) |
 
 ### 5.2 Throughput Benchmark (2,000,000 Cycles)
 Under a heavy arithmetic computational loop:

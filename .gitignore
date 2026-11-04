@@ -14,3 +14,7 @@ desktop.ini
 .idea/
 *.swp
 *.swo
+
+# Temporary test/scratch files
+tests/scratch/*
+!tests/scratch/.gitkeep

@@ -45,7 +45,7 @@ Whenever a non-trivial feature, refactor, or bug fix is requested, follow this t
   - Pass clear instructions: target files, implementation specifications, and the exact test/validation commands to run.
 - The subagent:
   - Edits target files.
-  - Runs local tests (e.g., `npm test` or test scripts) repeatedly until green.
+  - Runs local tests (e.g., `npm test` or `node tests/<test>.js`) repeatedly until green.
   - Fixes intermediate lint and test regressions inside its isolated context.
   - Returns **only** a concise summary of changes, key design choices, and test pass/fail results (no giant raw dumps).
 
@@ -56,7 +56,39 @@ Whenever a non-trivial feature, refactor, or bug fix is requested, follow this t
 
 ---
 
-## 3. Decision Matrix: Subagents vs. Forking (Branching)
+## 3. Subagent Autonomy & Permission Optimization
+
+To maximize autonomy and eliminate unnecessary permission confirmation prompts, all agents (Main and Subagents) must strictly follow these rules:
+
+### A. One Command Per Tool Call (Strictly No Chaining)
+- **Do NOT chain commands with `;`, `&&`, or `||`:**
+  - ❌ *Disallowed:* `node tools/build.js; npm test` or `git log -n 5; ls docs`
+  - ✅ *Allowed:* `npm test` as one tool call, and `node tools/build.js` as a separate tool call.
+- **Why this matters:** When commands are chained with `;` or `&&`, the permission engine treats the entire line as an unknown command string. The user cannot see what each sub-command does, and automatic permission rules (e.g. `node tests/*`) cannot match compound strings.
+
+### B. Sandbox Safety: Mandatory Scratch Directory (`tests/scratch/`)
+- **Strictly No Inline Scripts (`node -e "..."` / `python -c "..."`):**
+  - Inline scripts are opaque, cannot be reviewed beforehand, and create security risks (e.g., destructive file operations or unintentional modifications).
+  - Agents must NEVER use `node -e` or inline shell script strings.
+- **Dedicated Scratch Location (`tests/scratch/`):**
+  - All ad-hoc verification, benchmark, or reproduction scripts must be written to `tests/scratch/verify_<feature>.js`.
+  - The `tests/scratch/` directory is ignored by `.gitignore` to prevent repository clutter.
+  - The workspace pre-approves execution for `node tests/*`, so `node tests/scratch/verify_<feature>.js` runs seamlessly without prompts.
+- **Safety Constraints on Test Code:**
+  - Scripts placed in `tests/scratch/` must be strictly non-destructive (e.g. read-only emulator runs, unit assertions).
+  - Scripts must NEVER perform recursive deletions (`rm -rf`, `Remove-Item -Recurse`, `fs.rmSync`, `shutil.rmtree`), execute system configuration changes, or make outbound network calls.
+  - **Do NOT delete the `tests/scratch/` directory itself.** The directory is permanent and tracked via `.gitkeep`. Only delete the individual scratch file created during verification.
+
+### C. Native Tool Discipline (Never Shell Out to Read/Search Files)
+- **Always use native tools:** Use `read_file`, `edit_file`, and `write_file`.
+- **Do NOT run shell inspect commands:** Never execute `Select-String`, `Get-Content`, `cat`, `grep`, or `dir` through `run_command` just to inspect code. Native tools are faster, do not pollute terminal output, and require zero execution approvals.
+
+### D. Synchronous Wait Timeout
+- For test runs (`npm test`, `node tests/...`), always pass `WaitMsBeforeAsync: 10000` to allow the process to finish synchronously, avoiding premature background task switching.
+
+---
+
+## 4. Decision Matrix: Subagents vs. Forking (Branching)
 
 Choose the right mechanism depending on the task objectives:
 
@@ -69,45 +101,32 @@ Choose the right mechanism depending on the task objectives:
 
 ---
 
-## 4. Subagent Configuration & Project Conventions
+## 5. Subagent Configuration & Project Conventions
 
-### Recommended Agent Configuration (`.gemini/agents/drafter.md`)
-To define the subagent for Antigravity, configure:
+### Agent Configuration (`.gemini/agents/drafter.md`)
 ```yaml
 name: drafter
 description: Fast implementation specialist for writing code, drafting modules, and fixing tests.
 model: flash
 ```
-```markdown
-You are a fast, precise implementation agent. Your job is to implement code based on the exact specifications and architecture plan provided by the lead architect.
-
-Guidelines:
-1. Write clean, idiomatic code adhering to project conventions.
-2. Run project tests and linters to verify your implementation before reporting back.
-3. Once completed, provide a concise summary of the files modified, key implementation decisions, and verification test results. Do not dump raw file contents into your final message.
-```
+*(See `.gemini/agents/drafter.md` for complete prompt rules).*
 
 ### Orchestration Rule (`.gemini/rules/workflow.md`)
-```markdown
-# Development Workflow: Plan -> Delegate -> Review
-
-1. Architecture & Planning (Main Agent):
-   - For any non-trivial feature or refactor, first draft an architecture plan or spec.
-2. Implementation Delegation:
-   - Delegate mechanical drafting and coding to the drafter subagent (or self with Model: 'flash').
-   - Provide the subagent with target files, acceptance criteria, and test commands.
-3. Verification & Review (Main Agent):
-   - Once the subagent finishes, review the git diff against the architectural requirements.
-   - Run a final review for security, edge cases, and performance before presenting to the user.
-```
+*(See `.gemini/rules/workflow.md` for multi-stage workflow constraints).*
 
 ---
 
-## 5. Development & Testing Commands
+## 6. Development & Testing Commands
 
-- **Run Tests:** `npm test`
-- **Lint / Typecheck:** `npm run lint` / `npm run check` (where applicable)
+- **Run All Tests:** `npm test`
+- **Run Specific Test Suite:** `node tests/<test_name>.js`
+  - Examples:
+    - `node tests/test_jit.js`
+    - `node tests/test_decoder.js`
+    - `node tests/test_syscalls.js`
+    - `node tests/test_neon_fp.js`
 - **Directory Structure:**
-  - `src/`: Core emulator components, CPU registers, interpreter, recompiler, translator.
+  - `src/`: Core emulator components, CPU registers, interpreter, JIT compiler, translator.
   - `tests/`: Automated unit and integration test suites.
+  - `tools/`: Build scripts and binary generators.
   - `docs/`: Architectural documentation and instruction set references.
