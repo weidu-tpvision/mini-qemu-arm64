@@ -10,9 +10,10 @@ import {
 import { CPU } from "./cpu.js";
 import { Decoder, InstructionType, ConditionCode } from "./decoder.js";
 import { ElfLoader } from "./elf_loader.js";
+import { JitCompiler } from "./jit.js";
 
 export class MiniQEMU {
-  constructor() {
+  constructor(options = {}) {
     this.memory = new Memory();
     this.cpu = new CPU(this.memory);
     this.cycleCount = 0;
@@ -28,6 +29,13 @@ export class MiniQEMU {
     this.mmapRegions = new Map();
     this.onRead = null;
     this.stdinQueue = [];
+
+    // Dynamic Just-In-Time (JIT) Compilation Engine
+    this.jitEnabled = options.jitEnabled ?? true;
+    this.jit = new JitCompiler({
+      hotThreshold: options.jitHotThreshold ?? 5,
+      maxBlockInstructions: options.maxBlockInstructions ?? 64
+    });
 
     // Virtual File System (VFS) & Linux File Descriptor Table (fd >= 3)
     this.vfs = new Map();
@@ -151,6 +159,7 @@ export class MiniQEMU {
   }
 
   loadElf(filePathOrBuffer, name = "binary.elf") {
+    this.jit?.reset();
     this.memory.clear();
     this.cpu.reset();
     this.cycleCount = 0;
@@ -234,6 +243,7 @@ export class MiniQEMU {
   }
 
   reset() {
+    this.jit?.reset();
     if (this.loadedSource) {
       return this.loadElf(this.loadedSource.source, this.loadedSource.name);
     } else {
@@ -245,6 +255,7 @@ export class MiniQEMU {
   }
 
   loadProgram(instructions, loadAddress = 0x00400000) {
+    this.jit?.reset();
     this.memory.loadProgram(loadAddress, instructions);
     this.cpu.pc = BigInt(loadAddress);
     this.memory.lastWritten.clear();
@@ -343,6 +354,38 @@ export class MiniQEMU {
     if (shiftType === 0b01) return BigInt.asUintN(bits, maskedVal >> amt); // LSR
     if (shiftType === 0b10) return BigInt.asUintN(bits, BigInt.asIntN(bits, maskedVal) >> amt); // ASR
     return maskedVal;
+  }
+
+  // Apply ARM64 Unsigned Bitfield Move (UBFM / UXTB / UXTH / UBFX / LSR / LSL)
+  applyUBFM(srcVal, immr, imms, bits = 64) {
+    const src = BigInt.asUintN(bits, srcVal);
+    if (imms >= immr) {
+      const width = imms - immr + 1;
+      const mask = (1n << BigInt(width)) - 1n;
+      return (src >> BigInt(immr)) & mask;
+    } else {
+      const width = imms + 1;
+      const shift = bits - immr;
+      const mask = (1n << BigInt(width)) - 1n;
+      return BigInt.asUintN(bits, (src & mask) << BigInt(shift));
+    }
+  }
+
+  // Apply ARM64 Signed Bitfield Move (SBFM / SXTB / SXTH / SXTW / SBFX / ASR)
+  applySBFM(srcVal, immr, imms, bits = 64) {
+    const src = BigInt.asUintN(bits, srcVal);
+    if (imms >= immr) {
+      const width = imms - immr + 1;
+      const mask = (1n << BigInt(width)) - 1n;
+      const field = (src >> BigInt(immr)) & mask;
+      return BigInt.asUintN(bits, BigInt.asIntN(width, field));
+    } else {
+      const width = imms + 1;
+      const shift = bits - immr;
+      const mask = (1n << BigInt(width)) - 1n;
+      const field = src & mask;
+      return BigInt.asUintN(bits, BigInt.asIntN(width, field) << BigInt(shift));
+    }
   }
 
   // Compute effective memory address for single-register loads/stores (Immediate, Unscaled, Pre/Post-Index, or Register-Offset)
@@ -683,26 +726,10 @@ export class MiniQEMU {
       case InstructionType.UBFM:
       case InstructionType.SBFM: {
         const bits = decoded.sf === 0 ? 32 : 64;
-        const isSigned = decoded.type === InstructionType.SBFM;
-        const src = BigInt.asUintN(bits, this.cpu.getReg(decoded.rn));
-        const { immr, imms } = decoded;
-        let res;
-        if (imms >= immr) {
-          const width = imms - immr + 1;
-          const mask = (1n << BigInt(width)) - 1n;
-          const field = (src >> BigInt(immr)) & mask;
-          res = isSigned
-            ? BigInt.asUintN(bits, BigInt.asIntN(width, field))
-            : BigInt.asUintN(bits, field);
-        } else {
-          const width = imms + 1;
-          const shift = bits - immr;
-          const mask = (1n << BigInt(width)) - 1n;
-          const field = src & mask;
-          res = isSigned
-            ? BigInt.asUintN(bits, BigInt.asIntN(width, field) << BigInt(shift))
-            : BigInt.asUintN(bits, field << BigInt(shift));
-        }
+        const src = this.cpu.getReg(decoded.rn);
+        const res = decoded.type === InstructionType.SBFM
+          ? this.applySBFM(src, decoded.immr, decoded.imms, bits)
+          : this.applyUBFM(src, decoded.immr, decoded.imms, bits);
         this.cpu.setReg(decoded.rd, res);
         this.cpu.pc += 4n;
         break;
@@ -1125,6 +1152,7 @@ export class MiniQEMU {
               // Contraction: free pages between requestedBrk and this.brk
               const shrinkLen = Number(this.brk - requestedBrk);
               this.memory.freeRange(Number(requestedBrk), shrinkLen);
+              this.jit?.invalidateRange(Number(requestedBrk), shrinkLen);
             }
             // Expand or update heap to requested address
             this.brk = requestedBrk;
@@ -1168,6 +1196,7 @@ export class MiniQEMU {
           const len = Number(this.cpu.getReg(1));
           const alignedLen = (len + 4095) & ~4095;
           this.memory.freeRange(addr, alignedLen);
+          this.jit?.invalidateRange(addr, alignedLen);
           if (this.mmapRegions.has(addr)) {
             const region = this.mmapRegions.get(addr);
             if (alignedLen >= region.len) {
@@ -1869,7 +1898,78 @@ export class MiniQEMU {
     return stepResult;
   }
 
+  enableJit(enabled = true) {
+    this.jitEnabled = Boolean(enabled);
+    return this.jitEnabled;
+  }
+
+  getJitStats() {
+    const stats = this.jit ? this.jit.stats : { compilations: 0, blockExecutions: 0, jitCycles: 0, invalidations: 0 };
+    const totalCycles = this.cycleCount;
+    const jitCycles = stats.jitCycles;
+    const jitPct = totalCycles > 0 ? ((jitCycles / totalCycles) * 100).toFixed(1) : "0.0";
+    return {
+      enabled: this.jitEnabled,
+      hotThreshold: this.jit ? this.jit.hotThreshold : 5,
+      compiledBlocks: this.jit ? this.jit.blockCache.size : 0,
+      blockExecutions: stats.blockExecutions,
+      jitCycles,
+      totalCycles,
+      jitPercentage: Number(jitPct),
+      invalidations: stats.invalidations
+    };
+  }
+
+  getJitBlocks() {
+    if (!this.jit) return [];
+    return Array.from(this.jit.blockCache.values()).map(b => ({
+      startPC: b.startPC,
+      hexStartPC: `0x${b.startPC.toString(16).padStart(8, "0")}`,
+      endPC: b.endPC,
+      hexEndPC: `0x${b.endPC.toString(16).padStart(8, "0")}`,
+      instrCount: b.instrCount,
+      execCount: b.execCount,
+      disassembly: b.disassembly,
+      source: b.source
+    }));
+  }
+
+  runJit(maxCycles = 10000) {
+    while (!this.cpu.halted && this.cycleCount < maxCycles) {
+      const curPC = Number(this.cpu.pc);
+      if (this.breakpoints.has(curPC)) {
+        break;
+      }
+
+      let block = this.jit.getBlock(curPC);
+      if (!block) {
+        if (this.jit.recordEntry(curPC)) {
+          block = this.jit.compileBlock(curPC, this.memory);
+        }
+      }
+
+      if (block) {
+        const executed = block.fn(this.cpu, this.memory, this);
+        this.cycleCount += executed;
+        this.jit.stats.blockExecutions++;
+        this.jit.stats.jitCycles += executed;
+        block.execCount++;
+        if (this.cpu.halted) break;
+        const nextPC = Number(this.cpu.pc);
+        if (this.breakpoints.has(nextPC)) break;
+      } else {
+        const res = this.step(false);
+        if (res.hitBreakpoint || res.halted || res.yielded) break;
+      }
+    }
+    return this.cpu.exitCode;
+  }
+
   run(maxCycles = 10000, verbose = true) {
+    if (!verbose && !this.onStep && this.jitEnabled) {
+      return this.runJit(maxCycles);
+    }
+
     if (verbose) {
       console.log("==========================================================================================");
       console.log("                      Starting Mini-QEMU (ARM64 User-Space Mode)                          ");

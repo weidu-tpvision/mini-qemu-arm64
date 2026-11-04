@@ -56,6 +56,17 @@ const aotCodeBlock = document.getElementById("aotCodeBlock");
 const runBenchBtn = document.getElementById("runBenchBtn");
 const benchResultBadge = document.getElementById("benchResultBadge");
 
+// Dynamic JIT Telemetry & Control Elements
+const jitBadge = document.getElementById("jitBadge");
+const jitToggleCheckbox = document.getElementById("jitToggleCheckbox");
+const jitBlocksVal = document.getElementById("jitBlocksVal");
+const jitExecsVal = document.getElementById("jitExecsVal");
+const jitCyclesVal = document.getElementById("jitCyclesVal");
+const jitCoverageVal = document.getElementById("jitCoverageVal");
+const jitCodeBlock = document.getElementById("jitCodeBlock");
+const runJitBenchBtn = document.getElementById("runJitBenchBtn");
+const jitBenchResultBadge = document.getElementById("jitBenchResultBadge");
+
 const terminalWindow = document.getElementById("terminalWindow");
 const clearConsoleBtn = document.getElementById("clearConsoleBtn");
 
@@ -302,6 +313,45 @@ function updateCPUState(changed = [], changedFRegs = []) {
   }
 
   updatePipelineBar(pc);
+  updateJitView();
+}
+
+function updateJitView() {
+  const stats = emulator.getJitStats();
+  if (jitBlocksVal) jitBlocksVal.textContent = stats.compiledBlocks;
+  if (jitExecsVal) jitExecsVal.textContent = stats.blockExecutions.toLocaleString();
+  if (jitCyclesVal) jitCyclesVal.textContent = stats.jitCycles.toLocaleString();
+  if (jitCoverageVal) jitCoverageVal.textContent = `${stats.jitPercentage}%`;
+
+  if (jitBadge) {
+    jitBadge.innerHTML = `<span>⚡ JIT: <strong>${stats.compiledBlocks}</strong> blks (${stats.jitPercentage}%)</span>`;
+    jitBadge.style.opacity = stats.enabled ? "1" : "0.5";
+  }
+
+  if (jitCodeBlock) {
+    const blocks = emulator.getJitBlocks();
+    if (blocks.length === 0) {
+      jitCodeBlock.textContent = stats.enabled
+        ? `// Dynamic JIT is enabled (Hot Threshold = ${stats.hotThreshold}).\n// Run the program to compile hot basic blocks on the fly...`
+        : `// Dynamic JIT is disabled. Running in pure interpreter mode.`;
+    } else {
+      const output = [];
+      output.push(`// Mini-QEMU Dynamic JIT Code Cache (${blocks.length} Compiled Basic Blocks)`);
+      output.push(`// JIT Cycles: ${stats.jitCycles.toLocaleString()} / ${stats.totalCycles.toLocaleString()} (${stats.jitPercentage}%) | Executions: ${stats.blockExecutions.toLocaleString()}\n`);
+      for (const b of blocks) {
+        output.push(`// ==============================================================================`);
+        output.push(`// Basic Block: ${b.hexStartPC} -> ${b.hexEndPC} (${b.instrCount} instrs, executed ${b.execCount.toLocaleString()} times)`);
+        output.push(`// Disassembly:`);
+        for (const line of b.disassembly) {
+          output.push(`//   ${line}`);
+        }
+        output.push(`// Compiled Native JavaScript Closure:`);
+        output.push(b.source);
+        output.push(`\n`);
+      }
+      jitCodeBlock.textContent = output.join("\n");
+    }
+  }
 }
 
 function updatePipelineBar(pc) {
@@ -1207,6 +1257,62 @@ runBenchBtn.addEventListener("click", () => {
   benchResultBadge.textContent = `${speedup}x Faster (${interpMs.toFixed(1)}ms vs ${aotMs.toFixed(2)}ms)`;
   appendTerminal(`[AOT Benchmark] ${ITERATIONS.toLocaleString()} runs of ${currentLoadedName}: Interpreter=${interpMs.toFixed(2)}ms (X0=${interpRes}) | Static AOT=${aotMs.toFixed(2)}ms (X0=${aotRes}) -> ${speedup}x Speedup!\n`, "halt");
 });
+
+// 8b. Live In-Browser Dynamic JIT Controls & Benchmark
+if (jitToggleCheckbox) {
+  jitToggleCheckbox.addEventListener("change", (e) => {
+    emulator.enableJit(e.target.checked);
+    appendTerminal(`[JIT] Dynamic Just-In-Time compiler ${e.target.checked ? "ENABLED" : "DISABLED"}\n`);
+    updateJitView();
+  });
+}
+
+if (jitBadge) {
+  jitBadge.addEventListener("click", () => {
+    const jitTabBtn = document.querySelector('.tab-btn[data-tab="jitView"]');
+    if (jitTabBtn) jitTabBtn.click();
+  });
+}
+
+if (runJitBenchBtn) {
+  runJitBenchBtn.addEventListener("click", () => {
+    if (!currentLoadedBuffer) return;
+    const isGfx = isGraphicsBinary(currentLoadedName);
+    const ITERATIONS = isGfx ? 2 : 1000;
+    const MAX_CYCLES = isGfx ? 2000000 : 5000;
+
+    // 1. Benchmark Pure Interpreter
+    const interpEmu = new MiniQEMU({ jitEnabled: false });
+    interpEmu.suppressStdout = true;
+    interpEmu.loadElf(currentLoadedBuffer, currentLoadedName);
+    const t0 = performance.now();
+    for (let i = 0; i < ITERATIONS; i++) {
+      interpEmu.cpu.reset();
+      interpEmu.cpu.pc = interpEmu.entryPoint;
+      interpEmu.cycleCount = 0;
+      runUntilFrameOrHalt(interpEmu, MAX_CYCLES);
+    }
+    const interpMs = Math.max(0.05, performance.now() - t0);
+
+    // 2. Benchmark Dynamic JIT
+    const jitEmu = new MiniQEMU({ jitEnabled: true, jitHotThreshold: 3 });
+    jitEmu.suppressStdout = true;
+    jitEmu.loadElf(currentLoadedBuffer, currentLoadedName);
+    const t1 = performance.now();
+    for (let i = 0; i < ITERATIONS; i++) {
+      jitEmu.cpu.reset();
+      jitEmu.cpu.pc = jitEmu.entryPoint;
+      jitEmu.cycleCount = 0;
+      runUntilFrameOrHalt(jitEmu, MAX_CYCLES);
+    }
+    const jitMs = Math.max(0.05, performance.now() - t1);
+
+    const speedup = (interpMs / jitMs).toFixed(1);
+    jitBenchResultBadge.textContent = `${speedup}x Faster (${interpMs.toFixed(1)}ms vs ${jitMs.toFixed(2)}ms)`;
+    appendTerminal(`[JIT Benchmark] ${ITERATIONS.toLocaleString()} runs of ${currentLoadedName}: Interpreter=${interpMs.toFixed(2)}ms | Dynamic JIT=${jitMs.toFixed(2)}ms -> ${speedup}x Speedup!\n`, "halt");
+    updateJitView();
+  });
+}
 
 // 9. Event Listeners & View Tabs
 document.querySelectorAll(".tab-btn").forEach(btn => {

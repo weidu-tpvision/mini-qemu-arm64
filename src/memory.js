@@ -144,6 +144,36 @@ export class Memory {
     this.write32(numAddr + 4, high);
   }
 
+  // Read IEEE-754 single-precision float (32-bit)
+  readFloat32(addr) {
+    const raw = this.read32(addr);
+    const buf = new ArrayBuffer(4);
+    new Uint32Array(buf)[0] = raw;
+    return new Float32Array(buf)[0];
+  }
+
+  // Write IEEE-754 single-precision float (32-bit)
+  writeFloat32(addr, val) {
+    const buf = new ArrayBuffer(4);
+    new Float32Array(buf)[0] = val;
+    this.write32(addr, new Uint32Array(buf)[0]);
+  }
+
+  // Read IEEE-754 double-precision float (64-bit)
+  readFloat64(addr) {
+    const raw = this.read64(addr);
+    const buf = new ArrayBuffer(8);
+    new BigUint64Array(buf)[0] = raw;
+    return new Float64Array(buf)[0];
+  }
+
+  // Write IEEE-754 double-precision float (64-bit)
+  writeFloat64(addr, val) {
+    const buf = new ArrayBuffer(8);
+    new Float64Array(buf)[0] = val;
+    this.write64(addr, new BigUint64Array(buf)[0]);
+  }
+
   // Clear memory and reset pages (used on reset / reloading)
   clear() {
     this.pages.clear();

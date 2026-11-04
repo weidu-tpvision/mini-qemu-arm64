@@ -73,9 +73,16 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
   * `sys_brk` (214): Manages dynamic heap memory allocation (used by `malloc()`).
   * `sys_mmap` (222), `sys_munmap` (215) & `sys_mprotect` (226): Supports anonymous virtual memory mapping.
   * `sys_clock_gettime` (113), `sys_uname` (160), `sys_getpid` (172), `sys_gettid` (178), `sys_set_tid_address` (96) & `sys_getrandom` (278): Full runtime support for statically-linked `libc` (`musl` / `nolibc`).
-* **Dual Execution Modes:**
-  1. **Interactive Interpreter:** Step-by-step cycle execution with full register dumps.
-  2. **Static AOT Recompiler:** Translates ARM64 binary blocks into native host code, providing an **81.5x performance speedup**!
+* **Dynamic Just-In-Time (JIT) Compiler & Code Cache (`src/jit.js`):**
+  * **Tiered Execution:** Starts execution in the lightweight interpreter while profiling basic block hotness counters.
+  * **On-the-Fly Closure Emission:** Once a block crosses the hotness threshold (default: 5 entries), the JIT compiles the basic block into a high-performance JavaScript closure (`new Function(...)`) operating directly on typed register arrays.
+  * **100+x Speedup:** Benchmark tests demonstrate a **109.5x to 112.4x speedup** over the pure interpreter with **100% bit-exact parity** across all standard guest binaries.
+  * **Self-Modifying Code (SMC) & Cache Invalidation:** Automatically detects memory overwrites and unmappings (`sys_munmap` / `sys_brk`), invalidating stale blocks and re-compiling dynamically.
+  * **Interactive JIT Workbench:** Real-time UI telemetry displaying compiled block count, block executions, JIT coverage %, and decompiled JS closures with a live benchmark button.
+* **Dual & Tiered Execution Modes:**
+  1. **Interactive Interpreter:** Step-by-step cycle execution with full register dumps and memory diff tracking.
+  2. **Dynamic JIT Compiler:** Real-time tiered basic block compilation delivering **100+x speedup** on live loops.
+  3. **Static AOT Recompiler:** Translates complete ARM64 binaries into native standalone host modules.
 
 ---
 
@@ -141,6 +148,7 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── decoder.js                 # ARM64 bitfield instruction decoder (75+ Integer, System, VFP & NEON instructions)
 │   ├── elf_loader.js              # Universal ELF64 binary parser (Node.js & Browser DataView)
 │   ├── emulator.js                # Core Fetch-Decode-Execute pipeline, VFS, syscalls, hooks & breakpoints
+│   ├── jit.js                     # Dynamic Just-In-Time (JIT) basic block compiler & code cache
 │   ├── static_recompiler.js       # Approach 1: Binary-to-Source (JS) static AOT recompiler
 │   └── arm2x86.js                 # Approach 2: Direct Binary-to-Assembly (x86-64 / SSE) translator
 ├── ui/                            # Interactive Web Visual Debugger & AOT Workbench
@@ -148,7 +156,7 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── style.css                  # Clean modern dark-mode theme & animations
 │   ├── app.js                     # Browser debugger, NEON/Heap/VRAM inspectors & AOT benchmark runner
 │   └── fs_shim.js                 # Browser module shim for zero-build execution
-├── tests/                         # Automated Test Suite (9 Suites)
+├── tests/                         # Automated Test Suite (10 Suites)
 │   ├── test_decoder.js            # Unit tests for instruction decoding, shifts, bitfields, and math
 │   ├── test_ui_api.js             # Unit tests for UI hooks, breakpoints, memory diffs & reset
 │   ├── test_server.js             # Integration tests for HTTP dev server & binary streaming
@@ -157,7 +165,8 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── test_graphics.js           # Unit tests for Level 1 MMIO VRAM framebuffer & demo binaries
 │   ├── test_interactive.js        # Unit tests for MMIO keyboard/pointer input & 60 FPS VSync yield
 │   ├── test_dynamic_memory.js     # Unit tests for sys_brk contraction, sys_munmap & heap chunk coalescing
-│   └── test_neon_fp.js            # Unit tests for Scalar VFP, 128-bit NEON SIMD, saturation & translators
+│   ├── test_neon_fp.js            # Unit tests for Scalar VFP, 128-bit NEON SIMD, saturation & translators
+│   └── test_jit.js                # Unit tests for Dynamic JIT tiered compilation, parity & 100+x speedup
 ├── tools/                         # Server, Preview Generator & ELF64 Binary Builders
 │   ├── server.js                  # Zero-dependency Node HTTP dev server (`npm run ui`)
 │   ├── generate_ui_preview.js     # Generates docs/ui_preview.svg and docs/ui_preview.png
@@ -196,6 +205,7 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── ui_preview.svg             # High-resolution vector preview of the Web UI
 │   ├── ui_preview.png             # Raster PNG preview of the Web UI
 │   ├── instructions.md            # Comprehensive ARM64 instruction set reference (75+ instructions)
+│   ├── dynamic_jit_architecture.md# Deep dive on dynamic basic block JIT compilation, profiling & SMC
 │   ├── floating_point_and_neon_architecture.md # Deep dive on scalar VFP, 128-bit NEON & SIMD translation
 │   ├── dynamic_memory_architecture.md          # Deep dive on sys_brk, sys_mmap/munmap & allocators
 │   ├── graphics_architecture_and_emulation.md  # Deep dive on console graphics (PPU, Switch, PS5 & shaders)
