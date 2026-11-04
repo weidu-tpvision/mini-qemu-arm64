@@ -1,0 +1,27 @@
+{
+  "autonomous-safety-gate": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node safety_hook.js",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "write_file|edit_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node safety_hook.js",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

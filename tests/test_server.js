@@ -1,26 +1,15 @@
 // test_server.js - Verifies server startup, endpoints, and file serving
 import http from "node:http";
 import assert from "assert";
-import { spawn } from "node:child_process";
-
 console.log("Testing lightweight HTTP dev server...");
 
-// Spawn server process on custom port 3456
-const serverProcess = spawn("node", ["tools/server.js"], {
-  env: { ...process.env, PORT: "3456" },
-  stdio: ["ignore", "pipe", "pipe"]
-});
+// Start the server in-process on custom port 3456. Running in-process (instead of
+// spawning a child) lets this suite run under the Node permission sandbox without
+// --allow-child-process, which would otherwise be a full sandbox escape.
+process.env.PORT = "3456";
+await import("../tools/server.js");
 
-let serverOutput = "";
-serverProcess.stdout.on("data", (data) => {
-  serverOutput += data.toString();
-});
-
-serverProcess.stderr.on("data", (data) => {
-  console.error("Server stderr:", data.toString());
-});
-
-// Wait 500ms for server to bind
+// Wait for server to bind
 await new Promise(r => setTimeout(r, 600));
 
 function fetchUrl(path) {
@@ -92,6 +81,11 @@ try {
   console.log("[PASS] /ui/app.js and /src/emulator.js served with JavaScript MIME type");
 
   console.log("All HTTP server endpoint tests passed successfully!");
+} catch (err) {
+  console.error(err);
+  process.exitCode = 1;
 } finally {
-  serverProcess.kill();
+  // The in-process server keeps the event loop alive; exit explicitly
+  // (uses process.exitCode, so failures still exit non-zero).
+  process.exit();
 }

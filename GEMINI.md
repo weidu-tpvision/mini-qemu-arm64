@@ -27,9 +27,25 @@ This project adopts a two-tier agent architecture designed to preserve a clean, 
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
+### 1.1 Model-Aware Delegation Gate (check FIRST)
+
+Delegation only pays off when the main agent runs on a **stronger** model than the subagent. Before Stage 2, check which model you (the main agent) are running as:
+
+| Main agent model | Mode | Behavior |
+| :--- | :--- | :--- |
+| Gemini Pro (Model 4), Claude Opus, or any model stronger than Flash | **Delegate mode** | Follow Plan → Delegate (Flash subagent) → Review. |
+| Gemini Flash (Model 3.8) or lighter | **Solo mode** | **Do NOT spawn subagents** (`self`/`drafter`/Flash). Plan, implement, test, and self-review directly in your own context. |
+| Unknown / cannot determine | **Solo mode** | Same as above. |
+
+- **Why:** a Flash subagent spawned by a Flash main agent adds coordination overhead and context hand-off loss with zero model-quality gain. The user switches the main agent to Flash 3.8 when Pro/Opus quota is exhausted.
+- **Solo mode still applies every other rule** in this file: plan before coding, all safety/autonomy rules in §3, and a final self-review of the diff (Stage 3) before reporting.
+- To keep context lean in Solo mode, read only the files you need and use targeted test runs (`node tests/<suite>.js`) before the full `npm test`.
+
 ---
 
 ## 2. Core Execution Workflow: Plan → Delegate → Review
+
+> Stage 2 applies only in **Delegate mode** (see §1.1). In **Solo mode**, the main agent performs Stage 2 itself.
 
 Whenever a non-trivial feature, refactor, or bug fix is requested, follow this three-stage pattern:
 
@@ -70,21 +86,27 @@ To maximize autonomy and eliminate unnecessary permission confirmation prompts, 
 - **Strictly No Inline Scripts (`node -e "..."` / `python -c "..."`):**
   - Inline scripts are opaque, cannot be reviewed beforehand, and create security risks (e.g., destructive file operations or unintentional modifications).
   - Agents must NEVER use `node -e` or inline shell script strings.
-- **Dedicated Scratch Location (`tests/scratch/`):**
-  - All ad-hoc verification, benchmark, or reproduction scripts must be written to `tests/scratch/verify_<feature>.js`.
-  - The `tests/scratch/` directory is ignored by `.gitignore` to prevent repository clutter.
-  - The workspace pre-approves execution for `node tests/*`, so `node tests/scratch/verify_<feature>.js` runs seamlessly without prompts.
+- **Dedicated Scratch Location (`tests/scratch/*.js`):**
+  - Write all ad-hoc verification, benchmark, or reproduction scripts to `tests/scratch/<name>.js` (e.g., `tests/scratch/verify_<feature>.js`) using `write_file` (`Overwrite: true`), and execute `node tests/scratch/<name>.js`.
+  - **Zero Shell Deletions (`Remove-Item` / `rm`):** Because `tests/scratch/*` is ignored by `.gitignore`, **do NOT run `Remove-Item` or `rm` via `run_command`** to delete scratch scripts (which would trigger an unnecessary shell deletion prompt). Leave or overwrite files in `tests/scratch/`.
 - **Safety Constraints on Test Code:**
   - Scripts placed in `tests/scratch/` must be strictly non-destructive (e.g. read-only emulator runs, unit assertions).
-  - Scripts must NEVER perform recursive deletions (`rm -rf`, `Remove-Item -Recurse`, `fs.rmSync`, `shutil.rmtree`), execute system configuration changes, or make outbound network calls.
-  - **Do NOT delete the `tests/scratch/` directory itself.** The directory is permanent and tracked via `.gitkeep`. Only delete the individual scratch file created during verification.
+  - Scripts must NEVER perform deletions (`rm -rf`, `Remove-Item`, `fs.rmSync`, `shutil.rmtree`), execute system configuration changes, or make outbound network calls.
+  - **Do NOT delete the `tests/scratch/` directory or `tests/scratch/.gitkeep`.**
 
 ### C. Native Tool Discipline (Never Shell Out to Read/Search Files)
 - **Always use native tools:** Use `read_file`, `edit_file`, and `write_file`.
-- **Do NOT run shell inspect commands:** Never execute `Select-String`, `Get-Content`, `cat`, `grep`, or `dir` through `run_command` just to inspect code. Native tools are faster, do not pollute terminal output, and require zero execution approvals.
+- **Do NOT run shell inspect commands:** Never execute `Select-String`, `Get-Content`, `cat`, `grep`, or `dir` through `run_command` just to inspect code. Use the native `read_file` tool for file contents, and `git ls-files <dir>` for directory listing.
 
 ### D. Synchronous Wait Timeout
 - For test runs (`npm test`, `node tests/...`), always pass `WaitMsBeforeAsync: 10000` to allow the process to finish synchronously, avoiding premature background task switching.
+
+### E. Programmatic Enforcement Hook (`.agents/hooks.json` & `.agents/safety_hook.js`)
+- `PreToolUse` lifecycle hooks on `run_command` and `write_file`/`edit_file` automatically enforce the rules before execution:
+  - **Hard-Blocks (`deny`):** Command chaining (`;`, `&&`, `||`), inline evaluation (`node -e`, `node -pe`, `node --eval=`, `python -c`, `powershell -c`, `bash -c`, `cmd /c`, `iex`), shell deletion commands (`rm`, `Remove-Item`, `del`), shell file inspection (`cat`, `grep`, `Get-Content`, `Select-String` — use `read_file` or `git ls-files <dir>`), and any `tests/scratch/*.js` script containing `child_process`, `worker_threads`, network modules, `fetch`, `WebSocket`, `process.binding`, non-relative dynamic `import`, or fs deletion APIs.
+  - **Shell Metacharacter Guard:** Any command containing shell metacharacters (`|`, `&`, `<`, `>`, `` ` ``, `$`, `(`, `)`, `{`, `}`, `%`, `^`, `"`, `'`, or newlines) cannot be auto-approved and falls through to `ask`.
+  - **Sandbox Rewrite (`allow` + Node Permission Model):** Auto-approved test suites (`npm test`, `npm run test`, `node tools/run_tests.js`), ELF builders, emulator runs, and clean scratch scripts (`node tests/scratch/verify_<feature>.js`) are automatically rewritten to execute under Node 24's permission model (`--permission --allow-fs-read=<REPO_ROOT> --allow-fs-write=...`) with exact per-command `permissionOverrides` and normalized `WaitMsBeforeAsync: 10000`.
+  - **File-Write Guardrail (`force_ask`):** Modifications to protected repository infrastructure (`.agents/**`, `.gemini/**`, `.git/**`, `GEMINI.md`, `AGENTS.md`, `package.json`, `.gitignore`, `tools/run_tests.js`, `tools/safety_hook.js`) require explicit user confirmation.
 
 ---
 
@@ -97,7 +119,7 @@ Choose the right mechanism depending on the task objectives:
 | **Primary Purpose** | **Division of Labor** within a single objective. | **Exploratory Comparison** between conflicting paths. |
 | **Typical Use Case** | Plan $\rightarrow$ Code $\rightarrow$ Test $\rightarrow$ Review pipelines. | Comparing two mutually exclusive designs (e.g. Approach A vs. Approach B). |
 | **Context Behavior** | Isolated scratchpad; reports only final summary/diff back to parent. | Both branches stay independently alive for side-by-side evaluation. |
-| **Model Strategy** | Parent = Pro (Model 4), Child = Flash (Model 3.8). | Both branches typically run the same primary model. |
+| **Model Strategy** | Parent = Pro (Model 4) or Opus, Child = Flash (Model 3.8). Never spawn when the parent is already Flash (§1.1). | Both branches typically run the same primary model. |
 
 ---
 
@@ -109,10 +131,10 @@ name: drafter
 description: Fast implementation specialist for writing code, drafting modules, and fixing tests.
 model: flash
 ```
-*(See `.gemini/agents/drafter.md` for complete prompt rules).*
+*(See `.gemini/agents/drafter.md` for complete prompt rules. Invoke `self` with `Model: 'flash'` directly or register `drafter` via `define_subagent` before calling `invoke_subagent`).*
 
-### Orchestration Rule (`.gemini/rules/workflow.md`)
-*(See `.gemini/rules/workflow.md` for multi-stage workflow constraints).*
+### Orchestration Rule & Hooks (`.agents/rules/workflow.md`, `.agents/hooks.json`)
+*(See `.agents/rules/workflow.md` and `.gemini/rules/workflow.md` for multi-stage workflow constraints, and `.agents/hooks.json` for the `PreToolUse` safety and autonomy gate).*
 
 ---
 
