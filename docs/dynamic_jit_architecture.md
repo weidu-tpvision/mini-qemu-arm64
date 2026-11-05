@@ -138,7 +138,43 @@ If code is overwritten, the corresponding JIT compiled block is evicted from the
 
 ---
 
-## 5. Verification & Benchmark Results
+## 5. Direct Block Chaining (Dynamic Jump Patching)
+
+In standard basic-block JIT dispatchers, every block execution exits back to the central dispatcher loop, which looks up the next address in a hash map (`blockCache.get(nextPC)`). This introduces substantial dispatch and Map hashing overhead on tight loops.
+
+Mini-QEMU eliminates this overhead using **Direct Block Chaining**:
+
+```
+                       Direct Block Chaining
+                       
+    ┌──────────────────────┐         Direct Jump Patching         ┌──────────────────────┐
+    │   Compiled Block A   │ ───────────────────────────────────> │   Compiled Block B   │
+    │  (Loop Body / Start) │ <─────────────────────────────────── │   (Loop Tail Jump)   │
+    │    startPC: 0x400008 │            linkTaken /               │    startPC: 0x400010 │
+    │    endPC:   0x400010 │          linkFallthrough             │    endPC:   0x400018 │
+    └──────────────────────┘                                      └──────────────────────┘
+               ▲                                                             │
+               │               Invalidation & Unlink (SMC)                   │
+               └─────────────────────────────────────────────────────────────┘
+                               unlinkBlock(B) restores null
+```
+
+### 5.1 Architecture & Mechanics
+1. **Static Target Discovery:** During block discovery, the terminator instruction is inspected to extract static branch targets:
+   - `B` / `BL`: Unconditional target `targetTakenPC`.
+   - `B.cond`, `CBZ`, `CBNZ`, `TBZ`, `TBNZ`: Taken target `targetTakenPC` and fallthrough target `targetFallthroughPC`.
+   - Straight-line block boundary: `targetFallthroughPC`.
+2. **Dynamic Jump Patching (`linkBlock`):**
+   - When a block is compiled, if its target blocks are already present in `blockCache`, direct object references (`linkTaken` / `linkFallthrough`) are established immediately.
+   - If the target block has not yet compiled, the block registers in `chainWaiters`. Once the target compiles, the predecessor's links are patched automatically.
+3. **Chained Execution Loop:** The execution engine runs in an inner chaining loop. When a block terminates, if the destination matches `targetTakenPC` or `targetFallthroughPC` and a linked compiled block is available, execution jumps directly to that block without returning to the outer dispatcher or performing Map lookups.
+4. **SMC & Breakpoint Unlinking (`unlinkBlock`):**
+   - Each block maintains an `incomingSources` set tracking all predecessor blocks linking to it.
+   - When a block is invalidated (via `invalidateRange` or breakpoint insertion), all incoming links are cleanly unlinked (`linkTaken = null`, `linkFallthrough = null`), preventing stale jumps.
+
+---
+
+## 6. Verification & Benchmark Results
 
 Mini-QEMU includes an automated verification suite in [`tests/test_jit.js`](file:///C:/Users/wei.du/WorkAtTPVision/test/emulator/tests/test_jit.js).
 

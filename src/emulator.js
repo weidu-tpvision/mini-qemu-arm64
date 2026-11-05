@@ -2410,7 +2410,7 @@ export class MiniQEMU {
   }
 
   getJitStats() {
-    const stats = this.jit ? this.jit.stats : { compilations: 0, blockExecutions: 0, jitCycles: 0, invalidations: 0 };
+    const stats = this.jit ? this.jit.stats : { compilations: 0, blockExecutions: 0, jitCycles: 0, invalidations: 0, chainsFormed: 0, chainExecutions: 0 };
     const totalCycles = this.cycleCount;
     const jitCycles = stats.jitCycles;
     const jitPct = totalCycles > 0 ? ((jitCycles / totalCycles) * 100).toFixed(1) : "0.0";
@@ -2422,7 +2422,10 @@ export class MiniQEMU {
       jitCycles,
       totalCycles,
       jitPercentage: Number(jitPct),
-      invalidations: stats.invalidations
+      invalidations: stats.invalidations,
+      chainsFormed: stats.chainsFormed || 0,
+      chainUnlinks: stats.chainUnlinks || 0,
+      chainExecutions: stats.chainExecutions || 0
     };
   }
 
@@ -2436,7 +2439,9 @@ export class MiniQEMU {
       instrCount: b.instrCount,
       execCount: b.execCount,
       disassembly: b.disassembly,
-      source: b.source
+      source: b.source,
+      hasChainedTaken: b.linkTaken !== null,
+      hasChainedFallthrough: b.linkFallthrough !== null
     }));
   }
 
@@ -2455,20 +2460,54 @@ export class MiniQEMU {
       }
 
       if (block) {
-        this.lastYielded = false;
-        const executed = block.fn(this.cpu, this.memory, this);
-        if (executed === 0) {
-          const res = this.step(false);
-          if (res.hitBreakpoint || res.halted || (stopOnYield && res.yielded)) break;
-          continue;
+        // Direct Block Chaining Execution Loop
+        while (block && !this.cpu.halted && this.cycleCount < maxCycles) {
+          this.lastYielded = false;
+          const executed = block.fn(this.cpu, this.memory, this);
+          if (executed === 0) {
+            const res = this.step(false);
+            if (res.hitBreakpoint || res.halted || (stopOnYield && res.yielded)) return this.cpu.exitCode;
+            break;
+          }
+          this.cycleCount += executed;
+          this.jit.stats.blockExecutions++;
+          this.jit.stats.jitCycles += executed;
+          block.execCount++;
+          if (this.cpu.halted || (stopOnYield && this.lastYielded)) return this.cpu.exitCode;
+          const nextPC = Number(this.cpu.pc);
+          if (this.breakpoints.has(nextPC)) return this.cpu.exitCode;
+
+          // Direct jump resolution
+          let nextBlock = null;
+          if (nextPC === block.targetTakenPC) {
+            nextBlock = block.linkTaken;
+          } else if (nextPC === block.targetFallthroughPC) {
+            nextBlock = block.linkFallthrough;
+          }
+
+          if (nextBlock) {
+            this.jit.stats.chainExecutions++;
+            block = nextBlock;
+          } else {
+            // Check if next target block is already compiled and can be patched
+            nextBlock = this.jit.getBlock(nextPC);
+            if (nextBlock) {
+              if (nextPC === block.targetTakenPC) {
+                block.linkTaken = nextBlock;
+                nextBlock.incomingSources.add(block);
+                this.jit.stats.chainsFormed++;
+              } else if (nextPC === block.targetFallthroughPC) {
+                block.linkFallthrough = nextBlock;
+                nextBlock.incomingSources.add(block);
+                this.jit.stats.chainsFormed++;
+              }
+              this.jit.stats.chainExecutions++;
+              block = nextBlock;
+            } else {
+              break;
+            }
+          }
         }
-        this.cycleCount += executed;
-        this.jit.stats.blockExecutions++;
-        this.jit.stats.jitCycles += executed;
-        block.execCount++;
-        if (this.cpu.halted || (stopOnYield && this.lastYielded)) break;
-        const nextPC = Number(this.cpu.pc);
-        if (this.breakpoints.has(nextPC)) break;
       } else {
         const res = this.step(false);
         if (res.hitBreakpoint || res.halted || (stopOnYield && res.yielded)) break;

@@ -458,4 +458,46 @@ console.log("Running Dynamic Just-In-Time (JIT) Compiler Unit Tests...\n");
   console.log(`[PASS] JIT benchmark validated with significant real-world speedup!`);
 }
 
+// --- Test 7: Direct Block Chaining & Dynamic Jump Patching ---
+{
+  console.log("\nVerifying Direct Block Chaining & Link Invalidation...");
+  const emu = new MiniQEMU({ jitHotThreshold: 2 });
+  // Program with 2 chained blocks:
+  // Block 1 (0x400000):
+  //   add x0, x0, #1
+  //   cmp x0, #100
+  //   b.ne 0x400000  (loops back to 0x400000)
+  // Block 2 (0x40000c):
+  //   movz x8, #93
+  //   svc #0
+  const instructions = [
+    0x91000400, // 0x400000: add x0, x0, #1
+    0xf101901f, // 0x400004: cmp x0, #100
+    0x54000000 | (((-2) & 0x7ffff) << 5) | 1, // 0x400008: b.ne 0x400000
+    0xd2800ba8, // 0x40000c: movz x8, #93
+    0xd4000001  // 0x400010: svc #0
+  ];
+  emu.loadProgram(instructions, 0x00400000);
+  emu.run(500, false);
+
+  assert(emu.cpu.halted, "Chained program must halt");
+  assert(emu.cpu.getReg(0) === 100n, `x0 must be 100, got ${emu.cpu.getReg(0)}`);
+  const stats = emu.getJitStats();
+  assert(stats.chainsFormed >= 1, `Must form at least 1 direct block chain, got ${stats.chainsFormed}`);
+  assert(stats.chainExecutions > 50, `Must execute direct block chains, got ${stats.chainExecutions}`);
+
+  const loopBlock = emu.jit.getBlock(0x00400000);
+  assert(loopBlock !== undefined, "Loop block must exist in cache");
+  assert(loopBlock.linkTaken === loopBlock, "Self-loop taken link must point directly to itself");
+  assert(loopBlock.targetTakenPC === 0x00400000, "targetTakenPC must match loop start");
+  assert(loopBlock.targetFallthroughPC === 0x0040000c, "targetFallthroughPC must match exit block");
+
+  // Verify unlinking on invalidation
+  emu.jit.invalidateRange(0x00400000, 4);
+  assert(!emu.jit.blockCache.has(0x00400000), "Invalidated block must be removed");
+  const postStats = emu.getJitStats();
+  assert(postStats.chainUnlinks >= 1, `Invalidating block must trigger unlinking, got ${postStats.chainUnlinks}`);
+  console.log(`[PASS] Direct Block Chaining verified: ${stats.chainsFormed} chains formed, ${stats.chainExecutions} chained jumps, clean unlinking on invalidation`);
+}
+
 console.log("\nAll Dynamic JIT Compiler Tests Passed Successfully!");

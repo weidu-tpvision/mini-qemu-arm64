@@ -68,26 +68,128 @@ export class JitCompiler {
       blockExecutions: 0,
       jitCycles: 0,
       invalidations: 0,
+      chainsFormed: 0,
+      chainUnlinks: 0,
+      chainExecutions: 0,
     };
+
+    // Chain waiters: targetPC (Number) -> Set<CompiledBlock> waiting to link to target
+    this.chainWaiters = new Map();
   }
 
   /**
-   * Resets the JIT cache and hotness profiling counters.
+   * Resets the JIT cache, chaining links, and hotness profiling counters.
    */
   reset() {
-    this.blockCache.clear();
+    this.clear();
     this.hotCounters.clear();
     this.stats.compilations = 0;
     this.stats.blockExecutions = 0;
     this.stats.jitCycles = 0;
     this.stats.invalidations = 0;
+    this.stats.chainsFormed = 0;
+    this.stats.chainUnlinks = 0;
+    this.stats.chainExecutions = 0;
   }
 
   /**
-   * Clears only the compiled block cache, retaining hotness counters.
+   * Clears compiled block cache and unlinks all direct block chains, retaining hotness counters.
    */
   clear() {
+    for (const block of this.blockCache.values()) {
+      this.unlinkBlock(block);
+    }
     this.blockCache.clear();
+    this.chainWaiters.clear();
+  }
+
+  /**
+   * Links a newly compiled block with any existing compiled successors and predecessors.
+   */
+  linkBlock(block) {
+    // 1. Resolve outgoing links if target blocks are already compiled
+    if (block.targetTakenPC !== null) {
+      const target = this.blockCache.get(block.targetTakenPC);
+      if (target) {
+        block.linkTaken = target;
+        target.incomingSources.add(block);
+        this.stats.chainsFormed++;
+      } else {
+        if (!this.chainWaiters.has(block.targetTakenPC)) {
+          this.chainWaiters.set(block.targetTakenPC, new Set());
+        }
+        this.chainWaiters.get(block.targetTakenPC).add(block);
+      }
+    }
+
+    if (block.targetFallthroughPC !== null) {
+      const target = this.blockCache.get(block.targetFallthroughPC);
+      if (target) {
+        block.linkFallthrough = target;
+        target.incomingSources.add(block);
+        this.stats.chainsFormed++;
+      } else {
+        if (!this.chainWaiters.has(block.targetFallthroughPC)) {
+          this.chainWaiters.set(block.targetFallthroughPC, new Set());
+        }
+        this.chainWaiters.get(block.targetFallthroughPC).add(block);
+      }
+    }
+
+    // 2. Check if any previously compiled blocks were waiting for this block's startPC
+    if (this.chainWaiters.has(block.startPC)) {
+      const waiters = this.chainWaiters.get(block.startPC);
+      for (const srcBlock of waiters) {
+        if (srcBlock.targetTakenPC === block.startPC) {
+          srcBlock.linkTaken = block;
+          block.incomingSources.add(srcBlock);
+          this.stats.chainsFormed++;
+        }
+        if (srcBlock.targetFallthroughPC === block.startPC) {
+          srcBlock.linkFallthrough = block;
+          block.incomingSources.add(srcBlock);
+          this.stats.chainsFormed++;
+        }
+      }
+      this.chainWaiters.delete(block.startPC);
+    }
+  }
+
+  /**
+   * Unlinks all incoming and outgoing direct block links for a block being invalidated or removed.
+   */
+  unlinkBlock(block) {
+    if (block.incomingSources) {
+      for (const srcBlock of block.incomingSources) {
+        if (srcBlock.linkTaken === block) {
+          srcBlock.linkTaken = null;
+          this.stats.chainUnlinks++;
+        }
+        if (srcBlock.linkFallthrough === block) {
+          srcBlock.linkFallthrough = null;
+          this.stats.chainUnlinks++;
+        }
+      }
+      block.incomingSources.clear();
+    }
+
+    if (block.linkTaken) {
+      block.linkTaken.incomingSources?.delete(block);
+      block.linkTaken = null;
+      this.stats.chainUnlinks++;
+    }
+    if (block.linkFallthrough) {
+      block.linkFallthrough.incomingSources?.delete(block);
+      block.linkFallthrough = null;
+      this.stats.chainUnlinks++;
+    }
+
+    if (block.targetTakenPC !== null && this.chainWaiters.has(block.targetTakenPC)) {
+      this.chainWaiters.get(block.targetTakenPC).delete(block);
+    }
+    if (block.targetFallthroughPC !== null && this.chainWaiters.has(block.targetFallthroughPC)) {
+      this.chainWaiters.get(block.targetFallthroughPC).delete(block);
+    }
   }
 
   /**
@@ -99,6 +201,7 @@ export class JitCompiler {
     let count = 0;
     for (const [pc, block] of this.blockCache.entries()) {
       if (pc < end && block.endPC > start) {
+        this.unlinkBlock(block);
         this.blockCache.delete(pc);
         count++;
       }
@@ -107,6 +210,34 @@ export class JitCompiler {
       this.stats.invalidations += count;
     }
     return count;
+  }
+
+  /**
+   * Extracts static branch target addresses from the terminating instruction of a basic block.
+   */
+  extractBlockTargets(instructions) {
+    if (!instructions || instructions.length === 0) {
+      return { targetTakenPC: null, targetFallthroughPC: null };
+    }
+    const last = instructions[instructions.length - 1];
+    const d = last.decoded;
+    switch (d.type) {
+      case InstructionType.B:
+        return { targetTakenPC: last.pc + d.offsetBytes, targetFallthroughPC: null };
+      case InstructionType.B_COND:
+      case InstructionType.CBZ:
+      case InstructionType.CBNZ:
+      case InstructionType.TBZ:
+      case InstructionType.TBNZ:
+        return { targetTakenPC: last.pc + d.offsetBytes, targetFallthroughPC: last.pc + 4 };
+      case InstructionType.BL:
+        return { targetTakenPC: last.pc + d.offsetBytes, targetFallthroughPC: null };
+      default:
+        if (!isBlockTerminator(d.type)) {
+          return { targetTakenPC: null, targetFallthroughPC: last.pc + 4 };
+        }
+        return { targetTakenPC: null, targetFallthroughPC: null };
+    }
   }
 
   /**
@@ -188,6 +319,8 @@ export class JitCompiler {
       return null;
     }
 
+    const { targetTakenPC, targetFallthroughPC } = this.extractBlockTargets(instructions);
+
     const compiledBlock = {
       startPC: numPC,
       endPC,
@@ -198,8 +331,14 @@ export class JitCompiler {
       source: bodySource,
       execCount: 0,
       chainedTarget: null,
+      targetTakenPC,
+      targetFallthroughPC,
+      linkTaken: null,
+      linkFallthrough: null,
+      incomingSources: new Set(),
     };
 
+    this.linkBlock(compiledBlock);
     this.blockCache.set(numPC, compiledBlock);
     this.stats.compilations++;
     return compiledBlock;
