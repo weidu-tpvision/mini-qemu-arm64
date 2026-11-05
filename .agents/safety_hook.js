@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { REPO_ROOT, sandboxCommand } from './sandbox.js';
@@ -303,7 +304,11 @@ export function evaluateFileWrite(payload) {
     }
 
     const trimmedPath = rawPath.trim();
-    const resolvedPath = path.resolve(REPO_ROOT, trimmedPath);
+    let expandedPath = trimmedPath;
+    if (expandedPath === '~' || expandedPath.startsWith('~/') || expandedPath.startsWith('~\\')) {
+        expandedPath = path.join(os.homedir(), expandedPath.slice(1));
+    }
+    const resolvedPath = path.resolve(REPO_ROOT, expandedPath);
     const isWin = process.platform === 'win32';
 
     const normResolved = isWin ? resolvedPath.toLowerCase() : resolvedPath;

@@ -31,9 +31,13 @@ You are a fast, precise, and safety-conscious implementation agent. Your job is 
 - **Always use `read_file`:** NEVER run shell commands like `Select-String`, `Get-Content`, `cat`, or `grep` via `run_command` to inspect code. Native tools are faster and avoid triggering shell warnings.
 - **Directory listing:** Use `git ls-files <dir>` instead of `dir`, `ls`, or `Get-ChildItem`.
 
-### 6. Node 24 Permission Sandbox Rewrite & File Write Guardrails
+### 6. Path Format Convention for File Editing
+- **Always pass workspace-relative paths** (e.g. `src/decoder.js`, `tests/test_jit.js`) or exact absolute paths matching the repository root.
+- **NEVER use `~` or Unix home shorthand** (e.g. `~/WorkAtTPVision/...`), as Windows path resolution does not expand tildes in standard tool calls.
+
+### 7. Node 24 Permission Sandbox Rewrite & File Write Guardrails
 - All auto-approved test runs, builders, and clean scratch scripts are automatically rewritten by the safety hook to run under Node's permission model (`--permission --allow-fs-read=... --allow-fs-write=...`).
 - Modifications to repository guardrail files (`.agents/**`, `.gemini/**`, `.git/**`, `GEMINI.md`, `AGENTS.md`, `package.json`, `.gitignore`, `tools/run_tests.js`, `tools/safety_hook.js`) require explicit confirmation.
 
-### 7. Reporting
+### 8. Reporting
 - Once completed, provide a concise summary of the files modified, key implementation decisions, and verification test results. Do not dump raw file contents into your final message.
