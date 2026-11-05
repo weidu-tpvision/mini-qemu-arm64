@@ -102,7 +102,11 @@ console.log('Running Safety Hook Unit Tests...\n');
   const resClean = evaluateCommand({ toolCall: { name: 'run_command', args: { CommandLine: 'node tests/scratch/hooktest_clean.js' } } });
   assert.strictEqual(resClean.decision, 'allow');
   assert.ok(resClean.overwrite?.CommandLine?.includes('--permission'));
-  assert.deepStrictEqual(resClean.permissionOverrides, ['command(node tests/scratch/hooktest_clean.js)']);
+  assert.deepStrictEqual(resClean.permissionOverrides, [
+    'command(node tests/scratch/hooktest_clean.js)',
+    'Bash(node tests/scratch/hooktest_clean.js)',
+    'bash(node tests/scratch/hooktest_clean.js)'
+  ]);
 
   // Fixture containing dynamic import of child_process
   const badImportPath = path.join(scratchDir, 'hooktest_bad_import.js');
@@ -127,7 +131,11 @@ console.log('Running Safety Hook Unit Tests...\n');
   assert.strictEqual(resJit.decision, 'allow');
   assert.ok(resJit.overwrite?.CommandLine?.includes('--permission'));
   assert.ok(resJit.overwrite?.CommandLine?.includes('tests/test_jit.js'));
-  assert.deepStrictEqual(resJit.permissionOverrides, ['command(node tests/test_jit.js)']);
+  assert.deepStrictEqual(resJit.permissionOverrides, [
+    'command(node tests/test_jit.js)',
+    'Bash(node tests/test_jit.js)',
+    'bash(node tests/test_jit.js)'
+  ]);
   console.log('[PASS] node tests/test_jit.js sandboxed with exact permission override');
 }
 
