@@ -11,6 +11,7 @@ import { CPU } from "./cpu.js";
 import { Decoder, InstructionType, ConditionCode } from "./decoder.js";
 import { ElfLoader } from "./elf_loader.js";
 import { JitCompiler } from "./jit.js";
+import { DynamicLinker } from "./dynamic_linker.js";
 
 export class MiniQEMU {
   constructor(options = {}) {
@@ -42,7 +43,8 @@ export class MiniQEMU {
     this.vfs = new Map();
     this.fds = new Map();
     this.nextFd = 3;
-    this.cwd = "/workspace";
+    // Dynamic Linker for ELF Shared Objects (.so) and Dynamic Relocations
+    this.dynamicLinker = new DynamicLinker(this);
   }
 
   allocFd(minFd = 3) {
@@ -257,6 +259,14 @@ export class MiniQEMU {
 
     // Setup standard Linux initial stack frame (argc, argv, envp, auxv)
     this.setupLinuxStack(entryPoint, progName);
+
+    // If binary contains PT_DYNAMIC, perform dynamic linking and relocation
+    if (this.memory.elfHeader?.dynamicHeader) {
+      if (!this.dynamicLinker) {
+        this.dynamicLinker = new DynamicLinker(this);
+      }
+      this.dynamicLinker.link(this.memory.elfHeader.dynamicHeader);
+    }
 
     return entryPoint;
   }
@@ -550,6 +560,12 @@ export class MiniQEMU {
   }
 
   handleSyscall(imm16 = 0) {
+    if (imm16 === 0xdd && this.dynamicLinker) {
+      if (this.dynamicLinker.handleHleCall(imm16)) {
+        return false;
+      }
+    }
+
     const syscallNum = Number(this.cpu.getReg(8));
     let isYield = false;
 

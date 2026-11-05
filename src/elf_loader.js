@@ -41,6 +41,8 @@ export class ElfLoader {
     let loadedSegments = 0;
     let phdrVaddr = 0x00400000n + BigInt(e_phoff);
     let tlsHeader = null;
+    let dynamicHeader = null;
+    let interpreter = null;
 
     for (let i = 0; i < e_phnum; i++) {
       const phOffset = e_phoff + i * e_phentsize;
@@ -59,6 +61,23 @@ export class ElfLoader {
           memsz: Number(view.getBigUint64(phOffset + 40, true)),
           align: Number(view.getBigUint64(phOffset + 48, true))
         };
+      }
+
+      // p_type == 2 is PT_DYNAMIC (Dynamic linking information table)
+      if (p_type === 2) {
+        dynamicHeader = {
+          vaddr: view.getBigUint64(phOffset + 16, true),
+          filesz: Number(view.getBigUint64(phOffset + 32, true)),
+          memsz: Number(view.getBigUint64(phOffset + 40, true))
+        };
+      }
+
+      // p_type == 3 is PT_INTERP (Path to dynamic interpreter)
+      if (p_type === 3) {
+        const p_offset = Number(view.getBigUint64(phOffset + 8, true));
+        const p_filesz = Number(view.getBigUint64(phOffset + 32, true));
+        const interpBytes = bytes.subarray(p_offset, p_offset + p_filesz);
+        interpreter = new TextDecoder().decode(interpBytes).replace(/\0+$/, "");
       }
 
       // p_type == 1 is PT_LOAD (Loadable segment)
@@ -108,12 +127,15 @@ export class ElfLoader {
     }
 
     memory.elfHeader = {
+      type: e_type,
       entry: e_entry,
       phoff: e_phoff,
       phentsize: e_phentsize,
       phnum: e_phnum,
       phdrVaddr,
-      tlsHeader
+      tlsHeader,
+      dynamicHeader,
+      interpreter
     };
     memory.lastWritten.clear();
 
