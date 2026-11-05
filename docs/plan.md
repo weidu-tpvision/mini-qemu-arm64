@@ -195,6 +195,8 @@ The processor state consists of:
 | **Memory Store & Load** | Execute `STR` to memory and `LDR` back to register | Register matches stored value ($0x1234$) | **PASS** |
 | **String I/O (`sys_write`)** | Execute `hello.elf`, print string via Linux syscall 64 | "Hello from ARM64 running on Windows via Mini-QEMU!" printed | **PASS** |
 | **Web UI & Debugger API** | Breakpoints, stepping, memory block reads, and program reset | All UI hooks and server tests passing | **PASS** |
+| **Direct Block Chaining (Option A)** | Direct jump patching between hot JIT blocks (`linkTaken`/`linkFallthrough`) with clean unlinking on invalidation | 140x+ benchmark speedup over interpreter | **PASS** |
+| **Dynamic Linker & Shared Libraries (Option D)** | Load `libcalc.so`, parse `PT_DYNAMIC`, apply `R_AARCH64_JUMP_SLOT` / `RELATIVE`, HLE `SVC #0xdd` | Bit-exact parity between interpreter & JIT on `dynamic_app.elf` | **PASS** |
 
 ---
 

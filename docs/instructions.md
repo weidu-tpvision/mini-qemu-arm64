@@ -213,6 +213,7 @@ Used extensively by compilers (`gcc`, `clang`) for stack allocation and function
 * `sys_getrandom` (278), `sys_uname` (160), `sys_getpid` (172), `sys_getppid` (173), `sys_gettid` (178), `sys_getuid` (174), `sys_geteuid` (175), `sys_getgid` (176), `sys_getegid` (177): Process identity and entropy.
 * `sys_sched_yield` (124): Frame-yield MMIO synchronization for 60 FPS VSync loop.
 * `sys_statx` (291), `sys_rseq` (293), and unknown syscalls: Return official Linux `-ENOSYS` (-38) error code, enabling graceful fallback for libc feature detection.
+* `SVC #0xdd` (HLE Dynamic Symbol Trap): Intercepts guest runtime calls to standard C library symbols (`puts`, `strlen`, `abs`) using registered JavaScript host handlers.
 
 ---
 

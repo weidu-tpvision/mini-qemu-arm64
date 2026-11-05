@@ -76,9 +76,16 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 * **Dynamic Just-In-Time (JIT) Compiler & Code Cache (`src/jit.js`):**
   * **Tiered Execution:** Starts execution in the lightweight interpreter while profiling basic block hotness counters.
   * **On-the-Fly Closure Emission:** Once a block crosses the hotness threshold (default: 5 entries), the JIT compiles the basic block into a high-performance JavaScript closure (`new Function(...)`) operating directly on typed register arrays.
-  * **100+x Speedup:** Benchmark tests demonstrate a **109.5x to 112.4x speedup** over the pure interpreter with **100% bit-exact parity** across all standard guest binaries.
-  * **Self-Modifying Code (SMC) & Cache Invalidation:** Automatically detects memory overwrites and unmappings (`sys_munmap` / `sys_brk`), invalidating stale blocks and re-compiling dynamically.
+  * **Direct Basic-Block Chaining & Dynamic Jump Patching:** Links consecutive compiled blocks directly (`linkTaken` / `linkFallthrough`) with automatic incoming link invalidation, bypassing dispatcher loop and hash-map lookups on hot loops.
+  * **140x+ Speedup:** Benchmark tests demonstrate a **140x to 158x speedup** over the pure interpreter with **100% bit-exact parity** across all standard guest binaries.
+  * **Self-Modifying Code (SMC) & Cache Invalidation:** Automatically detects memory overwrites and unmappings (`sys_munmap` / `sys_brk`), invalidating stale blocks, cleanly unlinking predecessors, and re-compiling dynamically.
   * **Interactive JIT Workbench:** Real-time UI telemetry displaying compiled block count, block executions, JIT coverage %, and decompiled JS closures with a live benchmark button.
+* **ELF Dynamic Linker & Shared Libraries (`.so`, `src/dynamic_linker.js`):**
+  * **Program Header Parsing:** Automatically detects and parses `PT_DYNAMIC` and `PT_INTERP` headers.
+  * **Shared Library (.so) Loader:** Loads shared objects into high virtual RAM (`0x20000000+`), calculates load bias, and discovers exported function symbols from `.dynsym` and `.dynstr`.
+  * **AArch64 Relocation Engine:** Applies `R_AARCH64_JUMP_SLOT` (1026), `R_AARCH64_RELATIVE` (1027), and `R_AARCH64_GLOB_DAT` (1025) relocations to wire PLT jumps and GOT references.
+  * **High-Level Emulation (HLE) Trampoline Stubs:** Generates guest stubs in high memory (`0x70000000+`) trapping via `SVC #0xdd` into host JavaScript implementations of standard C functions (`puts`, `strlen`, `abs`).
+  * **Bit-Exact Interpreter & JIT Parity:** Dynamically-linked executables (`bin/dynamic_app.elf` calling `bin/libcalc.so`) execute with identical results in both interpreter and JIT modes.
 * **Dual & Tiered Execution Modes:**
   1. **Interactive Interpreter:** Step-by-step cycle execution with full register dumps and memory diff tracking.
   2. **Dynamic JIT Compiler:** Real-time tiered basic block compilation delivering **100+x speedup** on live loops.
@@ -147,8 +154,9 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── memory.js                  # 4 KB page-based virtual memory manager, MMIO VRAM/Input & freeRange()
 │   ├── decoder.js                 # ARM64 bitfield instruction decoder (75+ Integer, System, VFP & NEON instructions)
 │   ├── elf_loader.js              # Universal ELF64 binary parser (Node.js & Browser DataView)
+│   ├── dynamic_linker.js          # ELF dynamic linker, .so shared library loader, AArch64 relocations & HLE stubs
 │   ├── emulator.js                # Core Fetch-Decode-Execute pipeline, VFS, syscalls, hooks & breakpoints
-│   ├── jit.js                     # Dynamic Just-In-Time (JIT) basic block compiler & code cache
+│   ├── jit.js                     # Dynamic JIT basic block compiler, direct block chaining & code cache
 │   ├── static_recompiler.js       # Approach 1: Binary-to-Source (JS) static AOT recompiler
 │   └── arm2x86.js                 # Approach 2: Direct Binary-to-Assembly (x86-64 / SSE) translator
 ├── ui/                            # Interactive Web Visual Debugger & AOT Workbench
@@ -156,7 +164,7 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── style.css                  # Clean modern dark-mode theme & animations
 │   ├── app.js                     # Browser debugger, NEON/Heap/VRAM inspectors & AOT benchmark runner
 │   └── fs_shim.js                 # Browser module shim for zero-build execution
-├── tests/                         # Automated Test Suite (10 Suites)
+├── tests/                         # Automated Test Suite (12 Suites)
 │   ├── test_decoder.js            # Unit tests for instruction decoding, shifts, bitfields, and math
 │   ├── test_ui_api.js             # Unit tests for UI hooks, breakpoints, memory diffs & reset
 │   ├── test_server.js             # Integration tests for HTTP dev server & binary streaming
@@ -166,7 +174,9 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── test_interactive.js        # Unit tests for MMIO keyboard/pointer input & 60 FPS VSync yield
 │   ├── test_dynamic_memory.js     # Unit tests for sys_brk contraction, sys_munmap & heap chunk coalescing
 │   ├── test_neon_fp.js            # Unit tests for Scalar VFP, 128-bit NEON SIMD, saturation & translators
-│   └── test_jit.js                # Unit tests for Dynamic JIT tiered compilation, parity & 100+x speedup
+│   ├── test_jit.js                # Unit tests for Dynamic JIT tiered compilation, parity & 140x+ speedup
+│   ├── test_safety_hook.js        # Unit tests for agent execution sandboxing & permission overrides
+│   └── test_dynamic_linker.js     # Unit tests for PT_DYNAMIC, shared libraries (.so), relocations & HLE
 ├── tools/                         # Server, Preview Generator & ELF64 Binary Builders
 │   ├── server.js                  # Zero-dependency Node HTTP dev server (`npm run ui`)
 │   ├── generate_ui_preview.js     # Generates docs/ui_preview.svg and docs/ui_preview.png
@@ -178,13 +188,14 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── build_graphics_elf.js      # Generates bin/graphics_pattern.elf and bin/plasma.elf
 │   ├── build_interactive_elf.js   # Generates bin/interactive_paint.elf (interactive gamepad/mouse painter)
 │   ├── build_dynamic_memory_elf.js# Generates bin/dynamic_memory.elf (boundary-tag malloc/free & coalescing)
-│   └── build_neon_matrix_elf.js   # Generates bin/neon_matrix.elf (3D VFP hypotenuse & NEON 4S dot product)
+│   ├── build_neon_matrix_elf.js   # Generates bin/neon_matrix.elf (3D VFP hypotenuse & NEON 4S dot product)
+│   └── build_dynamic_elf.js       # Generates bin/libcalc.so and bin/dynamic_app.elf
 ├── guest/                         # Freestanding C++ Guest Source Code
 │   ├── fib.cpp                    # Iterative Fibonacci source code
 │   ├── fib_rec.cpp                # Recursive Fibonacci source code
 │   ├── hello.cpp                  # String I/O source code
 │   └── heap_demo.cpp              # Dynamic heap allocation source code
-├── bin/                           # Compiled 64-bit ARM ELF Executables (10 Binaries)
+├── bin/                           # Compiled 64-bit ARM ELF Executables & Shared Objects (12 Binaries)
 │   ├── fib.elf                    # Iterative Fibonacci(10) = 55
 │   ├── fib_rec.elf                # Recursive Fibonacci(10) = 55
 │   ├── hello.elf                  # String I/O via Linux sys_write
@@ -194,7 +205,9 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── plasma.elf                 # Level 1 MMIO 320x240 procedural demoscene plasma
 │   ├── interactive_paint.elf      # Interactive MMIO gamepad/mouse canvas painter
 │   ├── dynamic_memory.elf         # Boundary-tag allocator (malloc, free, reuse & coalescing)
-│   └── neon_matrix.elf            # Scalar VFP 3D magnitude & 128-bit NEON 4xFloat32 dot product
+│   ├── neon_matrix.elf            # Scalar VFP 3D magnitude & 128-bit NEON 4xFloat32 dot product
+│   ├── dynamic_app.elf            # Dynamic ELF executable linked against libcalc.so and HLE libc
+│   └── libcalc.so                 # Shared library exporting calc_add and calc_cube
 ├── out/                           # Generated AOT & Binary Translator Outputs
 │   ├── fib_recompiled.js          # Lifted JavaScript module from static_recompiler.js
 │   ├── fib_translated.asm         # Translated x86-64 NASM/Intel assembly (fib.elf)
@@ -205,14 +218,15 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── ui_preview.svg             # High-resolution vector preview of the Web UI
 │   ├── ui_preview.png             # Raster PNG preview of the Web UI
 │   ├── instructions.md            # Comprehensive ARM64 instruction set reference (75+ instructions)
-│   ├── dynamic_jit_architecture.md# Deep dive on dynamic basic block JIT compilation, profiling & SMC
+│   ├── dynamic_jit_architecture.md# Deep dive on dynamic JIT compilation, direct block chaining & SMC
+│   ├── dynamic_linking_architecture.md # Deep dive on ELF dynamic linking, shared objects (.so) & relocations
 │   ├── floating_point_and_neon_architecture.md # Deep dive on scalar VFP, 128-bit NEON & SIMD translation
 │   ├── dynamic_memory_architecture.md          # Deep dive on sys_brk, sys_mmap/munmap & allocators
 │   ├── graphics_architecture_and_emulation.md  # Deep dive on console graphics (PPU, Switch, PS5 & shaders)
 │   ├── static_linking_and_libc_architecture.md # Deep dive on static libc, system calls & Linux ABI
 │   ├── decoding_and_compilation.md# Deep dive on JIT vs. AOT, I/O thunking, recursion & PyTorch parallel
 │   ├── learning.md                # Comprehensive emulator fundamentals & 5 case studies
-│   └── plan.md                    # 6-phase architectural roadmap & verification matrix
+│   └── plan.md                    # Multi-phase architectural roadmap & verification matrix
 ├── instructions.md                # Quick root link to docs/instructions.md
 ├── package.json                   # Project manifest and npm scripts
 └── README.md                      # This file
