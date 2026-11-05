@@ -2,7 +2,7 @@
 import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
-import { evaluateCommand, evaluateFileWrite, hasShellMeta, REPO_ROOT } from '../.agents/safety_hook.js';
+import { evaluateCommand, evaluateFileWrite, hasShellMeta, makeOverrides, REPO_ROOT } from '../.agents/safety_hook.js';
 
 console.log('Running Safety Hook Unit Tests...\n');
 
@@ -102,11 +102,9 @@ console.log('Running Safety Hook Unit Tests...\n');
   const resClean = evaluateCommand({ toolCall: { name: 'run_command', args: { CommandLine: 'node tests/scratch/hooktest_clean.js' } } });
   assert.strictEqual(resClean.decision, 'allow');
   assert.ok(resClean.overwrite?.CommandLine?.includes('--permission'));
-  assert.deepStrictEqual(resClean.permissionOverrides, [
-    'command(node tests/scratch/hooktest_clean.js)',
-    'Bash(node tests/scratch/hooktest_clean.js)',
-    'bash(node tests/scratch/hooktest_clean.js)'
-  ]);
+  assert.ok(resClean.permissionOverrides.includes('command(node tests/scratch/hooktest_clean.js)'));
+  assert.ok(resClean.permissionOverrides.includes(`command(${resClean.overwrite.CommandLine})`));
+  assert.ok(resClean.permissionOverrides.includes(`Bash(${resClean.overwrite.CommandLine})`));
 
   // Fixture containing dynamic import of child_process
   const badImportPath = path.join(scratchDir, 'hooktest_bad_import.js');
@@ -131,11 +129,9 @@ console.log('Running Safety Hook Unit Tests...\n');
   assert.strictEqual(resJit.decision, 'allow');
   assert.ok(resJit.overwrite?.CommandLine?.includes('--permission'));
   assert.ok(resJit.overwrite?.CommandLine?.includes('tests/test_jit.js'));
-  assert.deepStrictEqual(resJit.permissionOverrides, [
-    'command(node tests/test_jit.js)',
-    'Bash(node tests/test_jit.js)',
-    'bash(node tests/test_jit.js)'
-  ]);
+  assert.ok(resJit.permissionOverrides.includes('command(node tests/test_jit.js)'));
+  assert.ok(resJit.permissionOverrides.includes(`command(${resJit.overwrite.CommandLine})`));
+  assert.ok(resJit.permissionOverrides.includes(`Bash(${resJit.overwrite.CommandLine})`));
   console.log('[PASS] node tests/test_jit.js sandboxed with exact permission override');
 }
 
@@ -144,10 +140,14 @@ console.log('Running Safety Hook Unit Tests...\n');
   const resNpmTest = evaluateCommand({ toolCall: { name: 'run_command', args: { CommandLine: 'npm test' } } });
   assert.strictEqual(resNpmTest.decision, 'allow');
   assert.strictEqual(resNpmTest.overwrite?.CommandLine, 'node tools/run_tests.js');
+  assert.ok(resNpmTest.permissionOverrides.includes('command(npm test)'));
+  assert.ok(resNpmTest.permissionOverrides.includes('command(node tools/run_tests.js)'));
 
   const resNpmRunBuild = evaluateCommand({ toolCall: { name: 'run_command', args: { CommandLine: 'npm run build-elfs' } } });
   assert.strictEqual(resNpmRunBuild.decision, 'allow');
   assert.strictEqual(resNpmRunBuild.overwrite?.CommandLine, 'node tools/run_tests.js --build');
+  assert.ok(resNpmRunBuild.permissionOverrides.includes('command(npm run build-elfs)'));
+  assert.ok(resNpmRunBuild.permissionOverrides.includes('command(node tools/run_tests.js --build)'));
   console.log('[PASS] npm test & build scripts rewritten to run_tests.js');
 }
 

@@ -25,6 +25,30 @@ export function hasShellMeta(cmd) {
 }
 
 /**
+ * Builds permission overrides covering both original and sandboxed command shapes,
+ * across all shell tool variants (command, Bash, bash).
+ *
+ * @param {string} cmd
+ * @param {string} [sandboxed]
+ * @returns {string[]}
+ */
+export function makeOverrides(cmd, sandboxed) {
+    const list = [
+        `command(${cmd})`,
+        `Bash(${cmd})`,
+        `bash(${cmd})`
+    ];
+    if (sandboxed && sandboxed !== cmd) {
+        list.push(
+            `command(${sandboxed})`,
+            `Bash(${sandboxed})`,
+            `bash(${sandboxed})`
+        );
+    }
+    return list;
+}
+
+/**
  * Antigravity PreToolUse Safety & Autonomy Hook for `run_command`.
  *
  * Enforces:
@@ -124,7 +148,7 @@ export function evaluateCommand(payload) {
         const waitMs = typeof args.WaitMsBeforeAsync === 'number' ? args.WaitMsBeforeAsync : 0;
         const response = {
             decision: 'allow',
-            permissionOverrides: [`command(${cmd})`, `Bash(${cmd})`, `bash(${cmd})`],
+            permissionOverrides: makeOverrides(cmd, 'node tools/run_tests.js'),
             overwrite: {
                 CommandLine: 'node tools/run_tests.js'
             }
@@ -139,7 +163,7 @@ export function evaluateCommand(payload) {
         const waitMs = typeof args.WaitMsBeforeAsync === 'number' ? args.WaitMsBeforeAsync : 0;
         const response = {
             decision: 'allow',
-            permissionOverrides: [`command(${cmd})`, `Bash(${cmd})`, `bash(${cmd})`],
+            permissionOverrides: makeOverrides(cmd, 'node tools/run_tests.js --build'),
             overwrite: {
                 CommandLine: 'node tools/run_tests.js --build'
             }
@@ -206,13 +230,14 @@ export function evaluateCommand(payload) {
             }
         }
 
+        const sandboxed = sandboxCommand(fileAndArgs);
         const waitMs = typeof args.WaitMsBeforeAsync === 'number' ? args.WaitMsBeforeAsync : 0;
         const response = {
             decision: 'allow',
-            permissionOverrides: [`command(${cmd})`, `Bash(${cmd})`, `bash(${cmd})`],
+            permissionOverrides: makeOverrides(cmd, sandboxed),
             overwrite: {
-                CommandLine: sandboxCommand(fileAndArgs),
-                command: sandboxCommand(fileAndArgs)
+                CommandLine: sandboxed,
+                command: sandboxed
             }
         };
         if (waitMs < 10000) {
@@ -228,13 +253,14 @@ export function evaluateCommand(payload) {
 
     if (isUnitTest || isElfBuilder || isEmulatorRun) {
         const fileAndArgs = cmd.replace(/^node\s+(?:\.\/|\.\\)?/, '').replace(/\\/g, '/');
+        const sandboxed = sandboxCommand(fileAndArgs);
         const waitMs = typeof args.WaitMsBeforeAsync === 'number' ? args.WaitMsBeforeAsync : 0;
         const response = {
             decision: 'allow',
-            permissionOverrides: [`command(${cmd})`, `Bash(${cmd})`, `bash(${cmd})`],
+            permissionOverrides: makeOverrides(cmd, sandboxed),
             overwrite: {
-                CommandLine: sandboxCommand(fileAndArgs),
-                command: sandboxCommand(fileAndArgs)
+                CommandLine: sandboxed,
+                command: sandboxed
             }
         };
         if (waitMs < 10000) {
@@ -260,7 +286,7 @@ export function evaluateCommand(payload) {
                 if (allValidTokens && !hasForbiddenFlag) {
                     return {
                         decision: 'allow',
-                        permissionOverrides: [`command(${cmd})`]
+                        permissionOverrides: makeOverrides(cmd)
                     };
                 }
             } else if (subCmd === 'branch') {
@@ -270,7 +296,7 @@ export function evaluateCommand(payload) {
                 if (allAllowed) {
                     return {
                         decision: 'allow',
-                        permissionOverrides: [`command(${cmd})`]
+                        permissionOverrides: makeOverrides(cmd)
                     };
                 }
             }
