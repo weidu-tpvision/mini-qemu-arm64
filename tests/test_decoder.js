@@ -267,4 +267,33 @@ console.log("Running ARM64 Instruction Decoder Extended Unit Tests...\n");
   console.log(`[PASS] Static Libc & Hardware Barrier instructions (NOP, DMB, ISB, CLZ, REV, EXTR, LDXR, STXR) verified.`);
 }
 
+// 9. Edge-case & Regression Tests: 1-source vs 2-source, PACIASP/hints, Exclusive byte/pair/ordered, CAS unknown
+{
+  const dUdiv = Decoder.decode(0x1ac00862); // udiv w2, w3, w0
+  assert(dUdiv.type === InstructionType.UDIV, `Expected UDIV, got ${dUdiv.type}`);
+  assert(dUdiv.rd === 2 && dUdiv.rn === 3 && dUdiv.rm === 0 && dUdiv.sf === 0, "udiv w2, w3, w0 fields must match");
+
+  const dSdiv = Decoder.decode(0x9ac00c20); // sdiv x0, x1, x0
+  assert(dSdiv.type === InstructionType.SDIV, `Expected SDIV, got ${dSdiv.type}`);
+  assert(dSdiv.rd === 0 && dSdiv.rn === 1 && dSdiv.rm === 0 && dSdiv.sf === 1, "sdiv x0, x1, x0 fields must match");
+
+  const dPac = Decoder.decode(0xd503233f); // paciasp
+  assert(dPac.type === InstructionType.NOP, `paciasp must decode as NOP, got ${dPac.type}`);
+  assert(dPac.disassembly === "paciasp", `paciasp disassembly expected "paciasp", got "${dPac.disassembly}"`);
+
+  const dLdxrb = Decoder.decode(0x085f7c20); // ldxrb w0, [x1]
+  assert(dLdxrb.type === InstructionType.LDXR && dLdxrb.bytes === 1 && dLdxrb.exclusive === true && dLdxrb.pair === false, "ldxrb must have bytes=1, exclusive=true, pair=false");
+
+  const dStlr = Decoder.decode(0xc89ffc20); // stlr x0, [x1]
+  assert(dStlr.type === InstructionType.STXR && dStlr.exclusive === false && dStlr.bytes === 8, "stlr must have exclusive=false, bytes=8");
+
+  const dLdxp = Decoder.decode(0xc87f0440); // ldxp x0, x1, [x2]
+  assert(dLdxp.type === InstructionType.LDXR && dLdxp.pair === true && dLdxp.rt2 === 1 && dLdxp.bytes === 8, "ldxp must have pair=true, rt2=1, bytes=8");
+
+  const dCas = Decoder.decode(0xc8a07c41); // cas
+  assert(dCas.type === InstructionType.UNKNOWN, `CAS must decode as UNKNOWN, got ${dCas.type}`);
+
+  console.log(`[PASS] Regression tests (1-src vs 2-src, PACIASP, LDXRB, STLR, LDXP, CAS) verified.`);
+}
+
 console.log("\nAll Decoder Unit Tests Passed Successfully!");

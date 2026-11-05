@@ -554,4 +554,203 @@ console.log("Running Level 1 Linux ARM64 System Call Unit Tests...\n");
   console.log("[PASS] Extended static libc syscalls (futex, prlimit64, robust_list, readv, signals, dup, ioctl, -ENOSYS fallback) verified!");
 }
 
+// --- Test 9: File Descriptors, Pipes, Redirection & Terminal Controls ---
+{
+  const emu = new MiniQEMU();
+
+  // 1. pipe2 (59) write-then-read round trip
+  const pipeBufAddr = 0x00409000;
+  emu.cpu.setReg(8, 59n); // sys_pipe2
+  emu.cpu.setReg(0, BigInt(pipeBufAddr));
+  emu.cpu.setReg(1, 0n);
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 0n, "pipe2 must return 0");
+  const rFd = emu.memory.read32(pipeBufAddr);
+  const wFd = emu.memory.read32(pipeBufAddr + 4);
+  assert(rFd >= 3 && wFd >= 3 && rFd !== wFd, `pipe2 must allocate distinct fds, got ${rFd}, ${wFd}`);
+
+  // Write to pipe
+  const writeText = "Hello pipe!";
+  const writeBytes = new TextEncoder().encode(writeText);
+  const msgAddr = 0x00409100;
+  for (let i = 0; i < writeBytes.length; i++) emu.memory.write8(msgAddr + i, writeBytes[i]);
+  emu.cpu.setReg(8, 64n); // sys_write
+  emu.cpu.setReg(0, BigInt(wFd));
+  emu.cpu.setReg(1, BigInt(msgAddr));
+  emu.cpu.setReg(2, BigInt(writeBytes.length));
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === BigInt(writeBytes.length), `write to pipe must write ${writeBytes.length} bytes`);
+
+  // Read from pipe
+  const readBufAddr = 0x00409200;
+  emu.cpu.setReg(8, 63n); // sys_read
+  emu.cpu.setReg(0, BigInt(rFd));
+  emu.cpu.setReg(1, BigInt(readBufAddr));
+  emu.cpu.setReg(2, 64n);
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === BigInt(writeBytes.length), `read from pipe must return ${writeBytes.length} bytes`);
+  const pipeReadStr = emu.readGuestCString(readBufAddr, writeBytes.length);
+  assert(pipeReadStr === writeText, `pipe read expected "${writeText}", got "${pipeReadStr}"`);
+
+  // Close pipe ends
+  emu.cpu.setReg(8, 57n); emu.cpu.setReg(0, BigInt(rFd)); emu.handleSyscall();
+  emu.cpu.setReg(8, 57n); emu.cpu.setReg(0, BigInt(wFd)); emu.handleSyscall();
+
+  // 2. dup(1) then write to the new fd goes to console (use emu.onWrite + emu.suppressStdout = true)
+  emu.suppressStdout = true;
+  let capturedOutput = "";
+  emu.onWrite = (str, fd) => {
+    capturedOutput += str;
+  };
+  emu.cpu.setReg(8, 23n); // sys_dup
+  emu.cpu.setReg(0, 1n); // stdout
+  emu.handleSyscall();
+  const dupStdoutFd = emu.cpu.getReg(0);
+  assert(dupStdoutFd >= 3n, `dup(1) must allocate fd >= 3, got ${dupStdoutFd}`);
+
+  const testConsoleMsg = "Captured via dup(1)!";
+  const consoleBytes = new TextEncoder().encode(testConsoleMsg);
+  const consoleMsgAddr = 0x00409300;
+  for (let i = 0; i < consoleBytes.length; i++) emu.memory.write8(consoleMsgAddr + i, consoleBytes[i]);
+  emu.cpu.setReg(8, 64n); // sys_write
+  emu.cpu.setReg(0, dupStdoutFd);
+  emu.cpu.setReg(1, BigInt(consoleMsgAddr));
+  emu.cpu.setReg(2, BigInt(consoleBytes.length));
+  emu.handleSyscall();
+  assert(capturedOutput === testConsoleMsg, `capturedOutput expected "${testConsoleMsg}", got "${capturedOutput}"`);
+  emu.onWrite = null;
+
+  // 3. dup3(fileFd, 1) redirects a write on fd 1 into the VFS file (after close, readVfsFile has content)
+  emu.mountFile("redirected.txt", "");
+  emu.cpu.setReg(8, 56n); // openat
+  const fnameAddr = 0x00409400;
+  const fnameBytes = new TextEncoder().encode("redirected.txt\0");
+  for (let i = 0; i < fnameBytes.length; i++) emu.memory.write8(fnameAddr + i, fnameBytes[i]);
+  emu.cpu.setReg(1, BigInt(fnameAddr));
+  emu.cpu.setReg(2, 2n); // O_RDWR
+  emu.handleSyscall();
+  const fileFd = emu.cpu.getReg(0);
+  assert(fileFd >= 3n, "openat should return valid fd for redirected.txt");
+
+  emu.cpu.setReg(8, 24n); // sys_dup3
+  emu.cpu.setReg(0, fileFd);
+  emu.cpu.setReg(1, 1n); // redirect stdout to fileFd
+  emu.cpu.setReg(2, 0n);
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 1n, "dup3(fileFd, 1) must return 1");
+
+  const redirText = "Written to stdout redirected to file!";
+  const redirBytes = new TextEncoder().encode(redirText);
+  const redirAddr = 0x00409500;
+  for (let i = 0; i < redirBytes.length; i++) emu.memory.write8(redirAddr + i, redirBytes[i]);
+  emu.cpu.setReg(8, 64n); // sys_write to fd 1
+  emu.cpu.setReg(0, 1n);
+  emu.cpu.setReg(1, BigInt(redirAddr));
+  emu.cpu.setReg(2, BigInt(redirBytes.length));
+  emu.handleSyscall();
+
+  // Close fd 1 (which drops redirected file and flushes it)
+  emu.cpu.setReg(8, 57n); // sys_close
+  emu.cpu.setReg(0, 1n);
+  emu.handleSyscall();
+
+  const fileContent = emu.readVfsFile("redirected.txt", true);
+  assert(fileContent === redirText, `redirected.txt expected "${redirText}", got "${fileContent}"`);
+
+  // Close fileFd
+  emu.cpu.setReg(8, 57n);
+  emu.cpu.setReg(0, fileFd);
+  emu.handleSyscall();
+
+  // 4. dup shares offset (read 3 bytes from fd A then 3 from its dup B => consecutive)
+  emu.mountFile("offset_test.txt", "1234567890");
+  const ofNameAddr = 0x00409600;
+  const ofNameBytes = new TextEncoder().encode("offset_test.txt\0");
+  for (let i = 0; i < ofNameBytes.length; i++) emu.memory.write8(ofNameAddr + i, ofNameBytes[i]);
+  emu.cpu.setReg(8, 56n); // openat
+  emu.cpu.setReg(1, BigInt(ofNameAddr));
+  emu.cpu.setReg(2, 0n); // O_RDONLY
+  emu.handleSyscall();
+  const fdA = emu.cpu.getReg(0);
+
+  emu.cpu.setReg(8, 23n); // dup
+  emu.cpu.setReg(0, fdA);
+  emu.handleSyscall();
+  const fdB = emu.cpu.getReg(0);
+
+  const part1Addr = 0x00409700;
+  emu.cpu.setReg(8, 63n); // read 3 bytes from fdA
+  emu.cpu.setReg(0, fdA);
+  emu.cpu.setReg(1, BigInt(part1Addr));
+  emu.cpu.setReg(2, 3n);
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 3n, "read 3 bytes from fdA");
+  const part1 = emu.readGuestCString(part1Addr, 3);
+  assert(part1 === "123", `part1 expected "123", got "${part1}"`);
+
+  const part2Addr = 0x00409710;
+  emu.cpu.setReg(8, 63n); // read 3 bytes from fdB
+  emu.cpu.setReg(0, fdB);
+  emu.cpu.setReg(1, BigInt(part2Addr));
+  emu.cpu.setReg(2, 3n);
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 3n, "read 3 bytes from fdB");
+  const part2 = emu.readGuestCString(part2Addr, 3);
+  assert(part2 === "456", `part2 expected "456", got "${part2}"`);
+
+  emu.cpu.setReg(8, 57n); emu.cpu.setReg(0, fdA); emu.handleSyscall();
+  emu.cpu.setReg(8, 57n); emu.cpu.setReg(0, fdB); emu.handleSyscall();
+
+  // 5. F_DUPFD_CLOEXEC returns a new fd >= 3 (not 0)
+  emu.cpu.setReg(8, 25n); // fcntl
+  emu.cpu.setReg(0, 0n); // stdin
+  emu.cpu.setReg(1, 1030n); // F_DUPFD_CLOEXEC
+  emu.cpu.setReg(2, 0n); // minFd = 0
+  emu.handleSyscall();
+  const cloexecFd = emu.cpu.getReg(0);
+  assert(cloexecFd >= 3n, `F_DUPFD_CLOEXEC must return fd >= 3, got ${cloexecFd}`);
+  emu.cpu.setReg(8, 57n); emu.cpu.setReg(0, cloexecFd); emu.handleSyscall();
+
+  // 6. ioctl TCGETS on a regular file fd => -ENOTTY (-25)
+  emu.mountFile("regular.txt", "abc");
+  const regNameAddr = 0x00409800;
+  const regNameBytes = new TextEncoder().encode("regular.txt\0");
+  for (let i = 0; i < regNameBytes.length; i++) emu.memory.write8(regNameAddr + i, regNameBytes[i]);
+  emu.cpu.setReg(8, 56n); // openat
+  emu.cpu.setReg(1, BigInt(regNameAddr));
+  emu.cpu.setReg(2, 0n);
+  emu.handleSyscall();
+  const regFd = emu.cpu.getReg(0);
+
+  emu.cpu.setReg(8, 29n); // ioctl
+  emu.cpu.setReg(0, regFd);
+  emu.cpu.setReg(1, 0x5401n); // TCGETS
+  emu.cpu.setReg(2, 0x00409900n);
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === BigInt.asUintN(64, -25n), `ioctl TCGETS on regular file expected -ENOTTY (-25), got ${emu.cpu.getReg(0)}`);
+  emu.cpu.setReg(8, 57n); emu.cpu.setReg(0, regFd); emu.handleSyscall();
+
+  // 7. prlimit64 RLIMIT_NOFILE => 1024
+  const nofileAddr = 0x00409a00;
+  emu.cpu.setReg(8, 261n); // prlimit64
+  emu.cpu.setReg(0, 0n);
+  emu.cpu.setReg(1, 7n); // RLIMIT_NOFILE
+  emu.cpu.setReg(2, 0n);
+  emu.cpu.setReg(3, BigInt(nofileAddr));
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === 0n, "prlimit64 RLIMIT_NOFILE must return 0");
+  assert(emu.memory.read64(nofileAddr) === 1024n, `RLIMIT_NOFILE cur limit must be 1024, got ${emu.memory.read64(nofileAddr)}`);
+  assert(emu.memory.read64(nofileAddr + 8) === 4096n, `RLIMIT_NOFILE max limit must be 4096, got ${emu.memory.read64(nofileAddr + 8)}`);
+
+  // 8. dup3(fd, fd) => -EINVAL (-22)
+  emu.cpu.setReg(8, 24n); // dup3
+  emu.cpu.setReg(0, 3n);
+  emu.cpu.setReg(1, 3n); // old === new
+  emu.cpu.setReg(2, 0n);
+  emu.handleSyscall();
+  assert(emu.cpu.getReg(0) === BigInt.asUintN(64, -22n), `dup3(fd, fd) expected -EINVAL (-22), got ${emu.cpu.getReg(0)}`);
+
+  console.log("[PASS] File descriptor management (pipe2, dup console, dup3 redirect, shared offset, F_DUPFD_CLOEXEC, TCGETS ENOTTY, prlimit64 NOFILE, dup3 EINVAL) verified!");
+}
+
 console.log("\nAll Level 1 Linux ARM64 System Call Tests Passed Successfully!");

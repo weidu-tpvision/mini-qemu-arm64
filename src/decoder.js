@@ -417,25 +417,29 @@ export class Decoder {
     // Extract (EXTR / ROR imm): op1 == 111
     if (op1 === 0b111 && ((raw >>> 29) & 0b11) === 0b00) {
       const sf = (raw >>> 31) & 1;
-      const rm = (raw >>> 16) & 0x1f;
+      const N = (raw >>> 22) & 1;
+      const o0 = (raw >>> 21) & 1;
       const imms = (raw >>> 10) & 0x3f;
-      const rn = (raw >>> 5) & 0x1f;
-      const rd = raw & 0x1f;
-      const reg = sf ? "x" : "w";
-      const lsb = imms & (sf ? 63 : 31);
-      const disasm = (rn === rm)
-        ? `ror ${reg}${rd}, ${reg}${rn}, #${lsb}`
-        : `extr ${reg}${rd}, ${reg}${rn}, ${reg}${rm}, #${lsb}`;
-      return {
-        type: InstructionType.EXTR,
-        raw,
-        sf,
-        rd,
-        rn,
-        rm,
-        lsb,
-        disassembly: disasm
-      };
+      if (o0 === 0 && N === sf && (sf === 1 || imms < 32)) {
+        const rm = (raw >>> 16) & 0x1f;
+        const rn = (raw >>> 5) & 0x1f;
+        const rd = raw & 0x1f;
+        const reg = sf ? "x" : "w";
+        const lsb = imms;
+        const disasm = (rn === rm)
+          ? `ror ${reg}${rd}, ${reg}${rn}, #${lsb}`
+          : `extr ${reg}${rd}, ${reg}${rn}, ${reg}${rm}, #${lsb}`;
+        return {
+          type: InstructionType.EXTR,
+          raw,
+          sf,
+          rd,
+          rn,
+          rm,
+          lsb,
+          disassembly: disasm
+        };
+      }
     }
 
     return { type: InstructionType.UNKNOWN, raw, disassembly: `unknown imm 0x${raw.toString(16)}` };
@@ -565,21 +569,46 @@ export class Decoder {
       };
     }
 
-    // 5b. System hints and barriers (NOP, YIELD, WFE, WFI, DMB, DSB, ISB)
+    // 5b. System hints and barriers (NOP, YIELD, WFE, WFI, DMB, DSB, ISB, etc.)
     if (((raw >>> 16) & 0xffff) === 0xd503) {
       const crn = (raw >>> 12) & 0xf;
+      const crm = (raw >>> 8) & 0xf;
       const op2 = (raw >>> 5) & 0x7;
       if (crn === 2) {
-        if (op2 === 0) return { type: InstructionType.NOP, raw, disassembly: "nop" };
-        if (op2 === 1) return { type: InstructionType.YIELD, raw, disassembly: "yield" };
-        if (op2 === 2) return { type: InstructionType.NOP, raw, disassembly: "wfe" };
-        if (op2 === 3) return { type: InstructionType.NOP, raw, disassembly: "wfi" };
+        const hintImm = (crm << 3) | op2;
+        if (hintImm === 0) return { type: InstructionType.NOP, raw, disassembly: "nop" };
+        if (hintImm === 1) return { type: InstructionType.YIELD, raw, disassembly: "yield" };
+        if (hintImm === 2) return { type: InstructionType.NOP, raw, disassembly: "wfe" };
+        if (hintImm === 3) return { type: InstructionType.NOP, raw, disassembly: "wfi" };
+        if (hintImm === 4) return { type: InstructionType.NOP, raw, disassembly: "sev" };
+        if (hintImm === 5) return { type: InstructionType.NOP, raw, disassembly: "sevl" };
+        if (hintImm === 0x19) return { type: InstructionType.NOP, raw, disassembly: "paciasp" };
+        if (hintImm === 0x1d) return { type: InstructionType.NOP, raw, disassembly: "autiasp" };
+        if (hintImm === 0x1b) return { type: InstructionType.NOP, raw, disassembly: "pacibsp" };
+        if (hintImm === 0x1f) return { type: InstructionType.NOP, raw, disassembly: "autibsp" };
+        if (hintImm === 0x07) return { type: InstructionType.NOP, raw, disassembly: "xpaclri" };
+        if (crm === 4) {
+          const btiTargets = { 0b000: "", 0b010: " c", 0b100: " j", 0b110: " jc" };
+          if (btiTargets[op2] !== undefined) {
+            return { type: InstructionType.NOP, raw, disassembly: `bti${btiTargets[op2]}` };
+          }
+        }
+        return { type: InstructionType.NOP, raw, disassembly: `hint #${hintImm}` };
       } else if (crn === 3) {
-        if (op2 === 5) return { type: InstructionType.DMB, raw, disassembly: "dmb sy" };
-        if (op2 === 4) return { type: InstructionType.DSB, raw, disassembly: "dsb sy" };
+        if (op2 === 2) return { type: InstructionType.NOP, raw, disassembly: "clrex" };
         if (op2 === 6) return { type: InstructionType.ISB, raw, disassembly: "isb" };
+        if (op2 === 7) return { type: InstructionType.NOP, raw, disassembly: "sb" };
+        const barrierOptions = {
+          15: "sy", 14: "st", 13: "ld",
+          11: "ish", 10: "ishst", 9: "ishld",
+          7: "nsh", 6: "nshst", 5: "nshld",
+          3: "osh", 2: "oshst", 1: "oshld"
+        };
+        const opt = barrierOptions[crm] || `#${crm}`;
+        if (op2 === 4) return { type: InstructionType.DSB, raw, disassembly: `dsb ${opt}` };
+        if (op2 === 5) return { type: InstructionType.DMB, raw, disassembly: `dmb ${opt}` };
       }
-      return { type: InstructionType.NOP, raw, disassembly: "nop" };
+      return { type: InstructionType.NOP, raw, disassembly: `sys_hint 0x${raw.toString(16)}` };
     }
 
     // 6. System Register Move (MRS / MSR): bits [31:22] = 0b1101010100 (0x354)
@@ -679,7 +708,7 @@ export class Decoder {
       const rd = raw & 0x1f;
       const regPrefix = sf ? "x" : "w";
 
-      if (rm === 0) { // 1-source operations: RBIT, REV16, REV, REV32, CLZ
+      if (op === 1 && s === 0 && rm === 0) { // 1-source operations: RBIT, REV16, REV, REV32, CLZ (opcode2 == 0)
         if (opcode === 0b000000) {
           return { type: InstructionType.RBIT, raw, sf, rd, rn, disassembly: `rbit ${regPrefix}${rd}, ${regPrefix}${rn}` };
         } else if (opcode === 0b000001) {
@@ -693,20 +722,25 @@ export class Decoder {
         } else if (opcode === 0b000100) {
           return { type: InstructionType.CLZ, raw, sf, rd, rn, disassembly: `clz ${regPrefix}${rd}, ${regPrefix}${rn}` };
         }
+        return { type: InstructionType.UNKNOWN, raw, disassembly: `unknown data-proc 1-src 0x${raw.toString(16)}` };
+      } else if (op === 1) {
+        return { type: InstructionType.UNKNOWN, raw, disassembly: `unknown data-proc 1-src 0x${raw.toString(16)}` };
       }
 
-      if (opcode === 0b000010) { // UDIV
-        return { type: InstructionType.UDIV, raw, sf, rd, rn, rm, disassembly: `udiv ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
-      } else if (opcode === 0b000011) { // SDIV
-        return { type: InstructionType.SDIV, raw, sf, rd, rn, rm, disassembly: `sdiv ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
-      } else if (opcode === 0b001000) { // LSLV
-        return { type: InstructionType.LSL, raw, sf, rd, rn, rm, isRegShift: true, disassembly: `lsl ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
-      } else if (opcode === 0b001001) { // LSRV
-        return { type: InstructionType.LSR, raw, sf, rd, rn, rm, isRegShift: true, disassembly: `lsr ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
-      } else if (opcode === 0b001010) { // ASRV
-        return { type: InstructionType.ASR, raw, sf, rd, rn, rm, isRegShift: true, disassembly: `asr ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
-      } else if (opcode === 0b001011) { // RORV
-        return { type: InstructionType.EXTR, raw, sf, rd, rn, rm, isRegShift: true, disassembly: `ror ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
+      if (op === 0 && s === 0) {
+        if (opcode === 0b000010) { // UDIV
+          return { type: InstructionType.UDIV, raw, sf, rd, rn, rm, disassembly: `udiv ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
+        } else if (opcode === 0b000011) { // SDIV
+          return { type: InstructionType.SDIV, raw, sf, rd, rn, rm, disassembly: `sdiv ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
+        } else if (opcode === 0b001000) { // LSLV
+          return { type: InstructionType.LSL, raw, sf, rd, rn, rm, isRegShift: true, disassembly: `lsl ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
+        } else if (opcode === 0b001001) { // LSRV
+          return { type: InstructionType.LSR, raw, sf, rd, rn, rm, isRegShift: true, disassembly: `lsr ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
+        } else if (opcode === 0b001010) { // ASRV
+          return { type: InstructionType.ASR, raw, sf, rd, rn, rm, isRegShift: true, disassembly: `asr ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
+        } else if (opcode === 0b001011) { // RORV
+          return { type: InstructionType.EXTR, raw, sf, rd, rn, rm, isRegShift: true, disassembly: `ror ${regPrefix}${rd}, ${regPrefix}${rn}, ${regPrefix}${rm}` };
+        }
       }
     }
 
@@ -853,37 +887,141 @@ export class Decoder {
   static _decodeLoadsAndStores(raw) {
     const isVec = ((raw >>> 26) & 1) === 1;
 
-    // 4.0 Load / Store Exclusive (LDXR / STXR): bits [29:24] = 001000
+    // 4.0 Load / Store Exclusive & Ordered: bits [29:24] = 001000
     if (!isVec && ((raw >>> 24) & 0x3f) === 0b001000) {
       const size = (raw >>> 30) & 0b11;
-      const lBit = (raw >>> 22) & 1; // 1 = LDXR, 0 = STXR
-      const rs = (raw >>> 16) & 0x1f; // status register for STXR
+      const o2 = (raw >>> 23) & 1;
+      const lBit = (raw >>> 22) & 1;
+      const o1 = (raw >>> 21) & 1;
+      const rs = (raw >>> 16) & 0x1f;
+      const o0 = (raw >>> 15) & 1;
+      const rt2 = (raw >>> 10) & 0x1f;
       const rn = (raw >>> 5) & 0x1f;
       const rt = raw & 0x1f;
-      const sf = size === 0b11 ? 1 : 0;
-      const regPrefix = sf ? "x" : "w";
+
       const baseName = rn === 31 ? "sp" : `x${rn}`;
-      if (lBit === 1) {
-        return {
-          type: InstructionType.LDXR,
-          raw,
-          sf,
-          size,
-          rt,
-          rn,
-          disassembly: `ldxr ${regPrefix}${rt}, [${baseName}]`
-        };
-      } else {
-        return {
-          type: InstructionType.STXR,
-          raw,
-          sf,
-          size,
-          rs,
-          rt,
-          rn,
-          disassembly: `stxr w${rs}, ${regPrefix}${rt}, [${baseName}]`
-        };
+
+      // o2=0, o1=0: exclusive single: LDXR/LDAXR (L=1) and STXR/STLXR (L=0)
+      if (o2 === 0 && o1 === 0) {
+        const bytes = 1 << size;
+        const sf = size === 3 ? 1 : 0;
+        const regPrefix = sf ? "x" : "w";
+        const suffix = size === 0 ? "b" : (size === 1 ? "h" : "");
+        if (lBit === 1) {
+          const mnemonic = (o0 === 1 ? "ldaxr" : "ldxr") + suffix;
+          return {
+            type: InstructionType.LDXR,
+            raw,
+            sf,
+            size,
+            bytes,
+            exclusive: true,
+            pair: false,
+            rt,
+            rn,
+            disassembly: `${mnemonic} ${regPrefix}${rt}, [${baseName}]`
+          };
+        } else {
+          const mnemonic = (o0 === 1 ? "stlxr" : "stxr") + suffix;
+          return {
+            type: InstructionType.STXR,
+            raw,
+            sf,
+            size,
+            bytes,
+            exclusive: true,
+            pair: false,
+            rs,
+            rt,
+            rn,
+            disassembly: `${mnemonic} w${rs}, ${regPrefix}${rt}, [${baseName}]`
+          };
+        }
+      }
+
+      // o2=0, o1=1: LDXP/STXP pair (size >= 2)
+      if (o2 === 0 && o1 === 1) {
+        if (size < 2) {
+          return { type: InstructionType.UNKNOWN, raw, disassembly: `unknown casp 0x${raw.toString(16)}` };
+        }
+        const bytes = size === 3 ? 8 : 4;
+        const sf = size === 3 ? 1 : 0;
+        const regPrefix = sf ? "x" : "w";
+        if (lBit === 1) {
+          const mnemonic = o0 === 1 ? "ldaxp" : "ldxp";
+          return {
+            type: InstructionType.LDXR,
+            raw,
+            sf,
+            size,
+            bytes,
+            exclusive: true,
+            pair: true,
+            rt,
+            rt2,
+            rn,
+            disassembly: `${mnemonic} ${regPrefix}${rt}, ${regPrefix}${rt2}, [${baseName}]`
+          };
+        } else {
+          const mnemonic = o0 === 1 ? "stlxp" : "stxp";
+          return {
+            type: InstructionType.STXR,
+            raw,
+            sf,
+            size,
+            bytes,
+            exclusive: true,
+            pair: true,
+            rs,
+            rt,
+            rt2,
+            rn,
+            disassembly: `${mnemonic} w${rs}, ${regPrefix}${rt}, ${regPrefix}${rt2}, [${baseName}]`
+          };
+        }
+      }
+
+      // o2=1, o1=0: LDAR/LDLAR (L=1) and STLR/STLLR (L=0)
+      if (o2 === 1 && o1 === 0) {
+        const bytes = 1 << size;
+        const sf = size === 3 ? 1 : 0;
+        const regPrefix = sf ? "x" : "w";
+        const suffix = size === 0 ? "b" : (size === 1 ? "h" : "");
+        if (lBit === 1) {
+          const mnemonic = "ldar" + suffix;
+          return {
+            type: InstructionType.LDXR,
+            raw,
+            sf,
+            size,
+            bytes,
+            exclusive: false,
+            pair: false,
+            rt,
+            rn,
+            disassembly: `${mnemonic} ${regPrefix}${rt}, [${baseName}]`
+          };
+        } else {
+          const mnemonic = "stlr" + suffix;
+          return {
+            type: InstructionType.STXR,
+            raw,
+            sf,
+            size,
+            bytes,
+            exclusive: false,
+            pair: false,
+            rs,
+            rt,
+            rn,
+            disassembly: `${mnemonic} ${regPrefix}${rt}, [${baseName}]`
+          };
+        }
+      }
+
+      // o2=1, o1=1: CAS family (LSE) => UNKNOWN
+      if (o2 === 1 && o1 === 1) {
+        return { type: InstructionType.UNKNOWN, raw, disassembly: `unknown cas 0x${raw.toString(16)}` };
       }
     }
 

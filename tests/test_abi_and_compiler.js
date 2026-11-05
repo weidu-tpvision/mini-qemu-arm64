@@ -258,7 +258,8 @@ console.log("Running Linux ABI Stack Frame & Compiler Primitives Unit Tests...\n
   assert(auxv.get(6) === 4096n, "AT_PAGESZ must be 4096");
   assert(auxv.get(9) === entryPoint, "AT_ENTRY must match entryPoint");
   assert(auxv.get(11) === 1000n && auxv.get(12) === 1000n, "AT_UID and AT_EUID must be 1000");
-  assert(auxv.get(16) === 0xffn, "AT_HWCAP must report FP/ASIMD (0xff)");
+  assert(auxv.get(16) === 0x3n, "AT_HWCAP must report FP/ASIMD (0x3)");
+  assert(auxv.get(26) === 0n, "AT_HWCAP2 must be 0");
   assert(auxv.get(17) === 100n, "AT_CLKTCK must be 100");
 
   const platStr = emu.readGuestCString(Number(auxv.get(15)));
@@ -273,17 +274,27 @@ console.log("Running Linux ABI Stack Frame & Compiler Primitives Unit Tests...\n
 // --- Test 7: Hardware Hints, Memory Barriers & Libc Primitives (Interpreter & JIT) ---
 for (const jitEnabled of [false, true]) {
   const mode = jitEnabled ? "JIT" : "Interpreter";
-  const emu = new MiniQEMU({ jitEnabled });
+  const emu = new MiniQEMU({ jitEnabled, jitHotThreshold: 1 });
   const spVal = 0x00700000;
   emu.cpu.sp = BigInt(spVal);
   emu.memory.write64(spVal, 0x1122334455667788n);
+  emu.memory.write8(spVal + 16, 0x42);
+  emu.memory.write64(spVal + 32, 0x1111222233334444n);
+  emu.memory.write64(spVal + 40, 0x5555666677778888n);
 
   const instructions = [
-    // 1. System hints & barriers (NOP, DMB, ISB, YIELD)
+    // 1. System hints & barriers (NOP, PACIASP, BTI C, DMB, ISB, YIELD)
     0xd503201f, // nop
+    0xd503233f, // paciasp (NOP)
+    0xd503245f, // bti c (NOP)
     0xd50335bf, // dmb sy
     0xd5033fdf, // isb
     0xd503203f, // yield
+
+    // 1b. UDIV where Rm is w0 (w16 = 100, w0 = 7 -> w17 = 14)
+    0x52800c90, // movz w16, #100
+    0x528000e0, // movz w0, #7
+    0x1ac00a11, // udiv w17, w16, w0
 
     // 2. CLZ w1, w0 (w0 = 16 -> 27 leading zeros)
     0x52800200, // movz w0, #16
@@ -323,13 +334,26 @@ for (const jitEnabled of [false, true]) {
     0x91000400, // add x0, x0, #1 (0x1122334455667789n)
     0xc8017fe0, // stxr w1, x0, [sp] (stores to [sp], w1 = 0)
 
+    // 11. LDXRB / STXRB byte atomic
+    0x910043f5, // add x21, sp, #16
+    0x085f7eb2, // ldxrb w18, [x21]
+    0x11000652, // add w18, w18, #1
+    0x08137eb2, // stxrb w19, w18, [x21]
+
+    // 12. LDXP / STXP pair atomic
+    0x910083f6, // add x22, sp, #32
+    0xc87f62d7, // ldxp x23, x24, [x22]
+    0x910006f7, // add x23, x23, #1
+    0x91000718, // add x24, x24, #1
+    0xc83962d7, // stxp w25, x23, x24, [x22]
+
     0xd2800ba8, // movz x8, #93
     0xd4000001  // svc #0
   ];
 
   emu.loadProgram(instructions, 0x00400000);
   emu.cpu.sp = BigInt(spVal);
-  emu.run(30, false);
+  emu.run(100, false);
 
   assert(emu.cpu.getReg(1) === 0n, `${mode}: stxr status w1 must be 0 (success)`);
   assert(emu.cpu.getReg(3) === 63n, `${mode}: clz 64-bit must be 63`);
@@ -340,6 +364,20 @@ for (const jitEnabled of [false, true]) {
   assert(emu.cpu.getReg(13) === 0x80000000n, `${mode}: rbit 32-bit expected 0x80000000, got 0x${emu.cpu.getReg(13).toString(16)}`);
   assert(emu.cpu.getReg(15) === 1n, `${mode}: ror #4 expected 1, got ${emu.cpu.getReg(15)}`);
   assert(emu.memory.read64(spVal) === 0x1122334455667789n, `${mode}: memory written by stxr must be updated`);
+
+  assert(emu.cpu.getReg(17) === 14n, `${mode}: udiv w17, w16, w0 (100 / 7) must be 14`);
+  assert(emu.cpu.getReg(18) === 0x43n, `${mode}: ldxrb byte + 1 must be 0x43`);
+  assert(emu.cpu.getReg(19) === 0n, `${mode}: stxrb status w19 must be 0 (success)`);
+  assert(emu.memory.read8(spVal + 16) === 0x43, `${mode}: memory written by stxrb must be 0x43`);
+  assert(emu.cpu.getReg(23) === 0x1111222233334445n, `${mode}: ldxp x23 + 1 must be 0x1111222233334445`);
+  assert(emu.cpu.getReg(24) === 0x5555666677778889n, `${mode}: ldxp x24 + 1 must be 0x5555666677778889`);
+  assert(emu.cpu.getReg(25) === 0n, `${mode}: stxp status w25 must be 0 (success)`);
+  assert(emu.memory.read64(spVal + 32) === 0x1111222233334445n, `${mode}: memory at sp+32 must be updated by stxp`);
+  assert(emu.memory.read64(spVal + 40) === 0x5555666677778889n, `${mode}: memory at sp+40 must be updated by stxp`);
+
+  if (jitEnabled) {
+    assert(emu.jit.stats.compilations > 0, "JIT mode must have compilations > 0");
+  }
 
   console.log(`[PASS] ${mode}: NOP/DMB/ISB/YIELD, CLZ, REV/REV16/REV32, RBIT, EXTR/ROR, LDXR/STXR verified!`);
 }
