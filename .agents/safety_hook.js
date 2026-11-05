@@ -44,13 +44,18 @@ export function hasShellMeta(cmd) {
  */
 export function evaluateCommand(payload) {
     const toolCall = payload?.toolCall;
-    if (!toolCall || toolCall.name !== 'run_command') {
+    const toolName = toolCall?.name ? toolCall.name.toLowerCase() : '';
+    if (!toolCall || (!['run_command', 'bash'].includes(toolName))) {
         // Never auto-approve a tool this function doesn't understand.
         return { decision: 'ask', reason: 'Unrecognized tool for command gate.' };
     }
 
     const args = toolCall.args || {};
-    const rawCmd = typeof args.CommandLine === 'string' ? args.CommandLine : '';
+    const rawCmd = typeof args.CommandLine === 'string'
+        ? args.CommandLine
+        : (typeof args.command === 'string'
+            ? args.command
+            : (typeof args.cmd === 'string' ? args.cmd : ''));
     const cmd = rawCmd.trim();
 
     if (!cmd) {
@@ -119,7 +124,7 @@ export function evaluateCommand(payload) {
         const waitMs = typeof args.WaitMsBeforeAsync === 'number' ? args.WaitMsBeforeAsync : 0;
         const response = {
             decision: 'allow',
-            permissionOverrides: [`command(${cmd})`],
+            permissionOverrides: [`command(${cmd})`, `Bash(${cmd})`, `bash(${cmd})`],
             overwrite: {
                 CommandLine: 'node tools/run_tests.js'
             }
@@ -134,7 +139,7 @@ export function evaluateCommand(payload) {
         const waitMs = typeof args.WaitMsBeforeAsync === 'number' ? args.WaitMsBeforeAsync : 0;
         const response = {
             decision: 'allow',
-            permissionOverrides: [`command(${cmd})`],
+            permissionOverrides: [`command(${cmd})`, `Bash(${cmd})`, `bash(${cmd})`],
             overwrite: {
                 CommandLine: 'node tools/run_tests.js --build'
             }
@@ -204,9 +209,10 @@ export function evaluateCommand(payload) {
         const waitMs = typeof args.WaitMsBeforeAsync === 'number' ? args.WaitMsBeforeAsync : 0;
         const response = {
             decision: 'allow',
-            permissionOverrides: [`command(${cmd})`],
+            permissionOverrides: [`command(${cmd})`, `Bash(${cmd})`, `bash(${cmd})`],
             overwrite: {
-                CommandLine: sandboxCommand(fileAndArgs)
+                CommandLine: sandboxCommand(fileAndArgs),
+                command: sandboxCommand(fileAndArgs)
             }
         };
         if (waitMs < 10000) {
@@ -216,18 +222,19 @@ export function evaluateCommand(payload) {
     }
 
     // 7. Unit tests, ELF builders, and emulator CLI -> sandbox rewrite
-    const isUnitTest = /^node\s+tests[\\/]test_[a-zA-Z0-9_]+\.js$/.test(cmd);
+    const isUnitTest = /^node\s+(?:\.\/|\.\\)?tests[\\/]test_[a-zA-Z0-9_]+\.js$/.test(cmd);
     const isElfBuilder = /^node\s+tools[\\/](?:elf_builder|build_[a-zA-Z0-9_]+_elf|generate_ui_preview)\.js$/.test(cmd);
     const isEmulatorRun = /^node\s+src[\\/](?:emulator|static_recompiler|arm2x86)\.js(?:\s+bin[\\/][a-zA-Z0-9_.-]+\.elf)?$/.test(cmd);
 
     if (isUnitTest || isElfBuilder || isEmulatorRun) {
-        const fileAndArgs = cmd.replace(/^node\s+/, '').replace(/\\/g, '/');
+        const fileAndArgs = cmd.replace(/^node\s+(?:\.\/|\.\\)?/, '').replace(/\\/g, '/');
         const waitMs = typeof args.WaitMsBeforeAsync === 'number' ? args.WaitMsBeforeAsync : 0;
         const response = {
             decision: 'allow',
-            permissionOverrides: [`command(${cmd})`],
+            permissionOverrides: [`command(${cmd})`, `Bash(${cmd})`, `bash(${cmd})`],
             overwrite: {
-                CommandLine: sandboxCommand(fileAndArgs)
+                CommandLine: sandboxCommand(fileAndArgs),
+                command: sandboxCommand(fileAndArgs)
             }
         };
         if (waitMs < 10000) {
@@ -289,12 +296,13 @@ export function evaluateCommand(payload) {
  */
 export function evaluateFileWrite(payload) {
     const toolCall = payload?.toolCall;
-    if (!toolCall || (toolCall.name !== 'write_file' && toolCall.name !== 'edit_file')) {
+    const toolName = toolCall?.name ? toolCall.name.toLowerCase() : '';
+    if (!toolCall || (!['write_file', 'edit_file', 'write', 'edit'].includes(toolName))) {
         return { decision: 'ask', reason: 'Unrecognized tool for file-write gate.' };
     }
 
     const args = toolCall.args || {};
-    const rawPath = args.Path || args.TargetFile || args.AbsolutePath || args.FilePath;
+    const rawPath = args.Path || args.TargetFile || args.AbsolutePath || args.FilePath || args.path || args.file || args.filename;
 
     if (!rawPath || typeof rawPath !== 'string' || !rawPath.trim()) {
         return {
@@ -354,7 +362,10 @@ export function evaluateFileWrite(payload) {
 }
 
 // Run when invoked directly as a hook command
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === __filename;
+const isMain = process.argv[1] && (
+    path.resolve(process.argv[1]).toLowerCase() === __filename.toLowerCase() ||
+    path.basename(process.argv[1]) === path.basename(__filename)
+);
 if (isMain) {
     let inputData = '';
     process.stdin.setEncoding('utf8');
@@ -364,9 +375,9 @@ if (isMain) {
     process.stdin.on('end', () => {
         try {
             const payload = inputData.trim() ? JSON.parse(inputData) : {};
-            const toolName = payload?.toolCall?.name;
+            const toolName = payload?.toolCall?.name ? payload.toolCall.name.toLowerCase() : '';
             let result;
-            if (toolName === 'write_file' || toolName === 'edit_file') {
+            if (['write_file', 'edit_file', 'write', 'edit'].includes(toolName)) {
                 result = evaluateFileWrite(payload);
             } else {
                 result = evaluateCommand(payload);
