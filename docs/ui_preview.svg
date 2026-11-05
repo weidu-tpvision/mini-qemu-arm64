@@ -278,13 +278,14 @@
     <rect width="360" height="694" class="panel"/>
     <path d="M0 8 Q0 0 8 0 L352 0 Q360 0 360 8 L360 34 L0 34 Z" class="panel-hdr"/>
     
-    <!-- Memory / Stack / Heap / Display Tabs -->
-    <rect x="6" y="5" width="70" height="24" rx="5" fill="#0f1523" stroke="#243048"/>
-    <text x="11" y="21" fill="#06b6d4" font-size="9" font-weight="bold">Memory Hex</text>
-    <text x="84" y="21" fill="#64748b" font-size="9" font-weight="bold">Call Stack</text>
-    <text x="144" y="21" fill="#64748b" font-size="9" font-weight="bold">Heap</text>
-    <text x="180" y="21" fill="#38bdf8" font-size="9" font-weight="bold">📺 Display</text>
-    <text x="275" y="21" fill="#64748b" font-size="9.5" class="mono">320×240 VRAM</text>
+    <!-- Memory / Stack / Heap / Display / Audio Tabs -->
+    <rect x="6" y="5" width="60" height="24" rx="5" fill="#0f1523" stroke="#243048"/>
+    <text x="10" y="21" fill="#06b6d4" font-size="8.5" font-weight="bold">Memory</text>
+    <text x="74" y="21" fill="#64748b" font-size="8.5" font-weight="bold">Stack</text>
+    <text x="108" y="21" fill="#64748b" font-size="8.5" font-weight="bold">Heap</text>
+    <text x="140" y="21" fill="#38bdf8" font-size="8.5" font-weight="bold">📺 Screen</text>
+    <text x="194" y="21" fill="#a855f7" font-size="8.5" font-weight="bold">🎵 Audio</text>
+    <text x="268" y="21" fill="#64748b" font-size="8.5" class="mono">MMIO Devices</text>
 
     <!-- Address jumper toolbar -->
     <rect x="8" y="40" width="344" height="32" fill="#0f1523" stroke="#243048" stroke-width="1" rx="6"/>

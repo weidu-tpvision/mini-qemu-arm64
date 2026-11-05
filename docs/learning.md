@@ -230,3 +230,23 @@ The browser GUI supports arbitrary clock rates:
 * **Clocked Rates (1 Hz, 5 Hz, 20 Hz, 100 Hz):** Use `setInterval` to trigger individual cycles with guaranteed UI repaints.
 * **Turbo Mode (Max Speed):** Batches 50 cycles per `requestAnimationFrame` frame, providing thousands of instructions per second while keeping the UI responsive.
 
+---
+
+## 9. Case Study 6: Memory-Mapped I/O (MMIO) — Graphics, Input & Sound Synthesis
+
+In real hardware systems (such as the Game Boy, NES, or modern SoCs), the CPU communicates with hardware peripherals not through special instructions, but through **Memory-Mapped I/O (MMIO)**: read and write instructions (`LDR`, `STR`) to designated physical address ranges mutate peripheral state.
+
+Mini-QEMU implements three unified MMIO hardware regions:
+
+1. **Level 1 MMIO Graphics Framebuffer (`0x00800000`–`0x0084B000`):**
+   - $320 \times 240$ resolution at 32-bit RGBA (307.2 KB).
+   - Writing 32-bit pixel colors directly alters virtual RAM; the browser canvas renders changed pages with CRT scanline simulation.
+2. **MMIO Interactive Input Controller (`0x00850000`):**
+   - Maps keyboard key states, pointer coordinates $(X, Y)$, and button states into readable registers.
+   - Synchronizes with guest programs using `sys_sched_yield` (`syscall 124`) for smooth 60 FPS loops.
+3. **MMIO Audio Peripheral & Sound Synthesizer (`0x00860000` & `0x00870000`):**
+   - **Hardware Registers (`0x00860000`):** Control audio playback, sample rate, bit depth, and cursor offsets.
+   - **3-Channel Chiptune PSG (`0x00860020`–`0x0086004C`):** Pulse wave with selectable duty cycle, triangle wave, and 16-bit Galois LFSR pseudo-random noise generator.
+   - **PCM Ring Buffer (`0x00870000`):** 16 KB circular buffer for direct digital sample streaming with wrap-around tracking.
+   - **Web Audio & Oscilloscope:** The frontend plays synthesized audio via the Web Audio API and draws a real-time cyan phosphor oscilloscope.
+
