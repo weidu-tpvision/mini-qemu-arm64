@@ -258,6 +258,7 @@
           <button class="mem-tab-btn" data-memtab="stackView">Call Stack</button>
           <button class="mem-tab-btn" data-memtab="heapView">Heap Allocator</button>
           <button class="mem-tab-btn" data-memtab="screenView">📺 Display</button>
+          <button class="mem-tab-btn" data-memtab="audioView">🎵 Audio</button>
         </div>
         <span class="header-info" id="vramHeaderBadge">4 KB Pages</span>
       </div>
@@ -414,6 +415,50 @@
             <span>Frames: <span id="vramFrameCount" class="mono">0</span></span>
             <span id="vramFpsBadge" class="mono">0 FPS</span>
             <span>Status: <span id="vramStatusText" class="text-accent">Standby</span></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 5: MMIO Audio Peripheral & Oscilloscope -->
+      <div class="panel-body mem-tab-content" id="audioView" style="display: none;">
+        <div class="audio-container" style="display: flex; flex-direction: column; gap: 12px; padding: 12px; height: 100%; box-sizing: border-box; overflow-y: auto;">
+          <div class="audio-toolbar" style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <button class="btn btn-primary" id="toggleAudioBtn" style="padding: 4px 12px; font-size: 11px;">▶ Start Audio</button>
+              <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted);">
+                Volume
+                <input type="range" id="audioVolumeSlider" min="0" max="100" value="80" style="width: 80px;">
+              </label>
+            </div>
+            <div style="display: flex; gap: 6px;">
+              <span class="screen-badge" id="audioFormatBadge">44.1 kHz Mono</span>
+              <span class="screen-badge vram-addr" id="audioPcmBadge" title="PCM Ring Buffer Usage">PCM: 0 B</span>
+            </div>
+          </div>
+
+          <!-- Oscilloscope Canvas -->
+          <div style="background: #080c14; border: 1px solid var(--border-color); border-radius: 6px; padding: 8px; position: relative;">
+            <div style="font-size: 10px; color: var(--accent-cyan); margin-bottom: 4px; font-weight: 600; text-transform: uppercase;">Real-Time Oscilloscope</div>
+            <canvas id="audioOscilloscope" width="320" height="100" style="width: 100%; height: 100px; display: block; border-radius: 4px; background: #040810;"></canvas>
+          </div>
+
+          <!-- Chiptune PSG Hardware Channels -->
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
+            <div class="metric-card" style="padding: 8px; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color);">
+              <div style="font-size: 10px; color: var(--accent-pink); font-weight: bold;">CH0: PULSE</div>
+              <div style="font-size: 13px; font-weight: bold; margin-top: 4px;" id="audioCh0Freq" class="mono">0 Hz</div>
+              <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;" id="audioCh0Meta">Vol: 0 | 50%</div>
+            </div>
+            <div class="metric-card" style="padding: 8px; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color);">
+              <div style="font-size: 10px; color: var(--accent-cyan); font-weight: bold;">CH1: TRIANGLE</div>
+              <div style="font-size: 13px; font-weight: bold; margin-top: 4px;" id="audioCh1Freq" class="mono">0 Hz</div>
+              <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;" id="audioCh1Meta">Vol: 0 | Tri</div>
+            </div>
+            <div class="metric-card" style="padding: 8px; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color);">
+              <div style="font-size: 10px; color: var(--accent-green); font-weight: bold;">CH2: NOISE</div>
+              <div style="font-size: 13px; font-weight: bold; margin-top: 4px;" id="audioCh2Freq" class="mono">0 Hz</div>
+              <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;" id="audioCh2Meta">Vol: 0 | LFSR</div>
+            </div>
           </div>
         </div>
       </div>

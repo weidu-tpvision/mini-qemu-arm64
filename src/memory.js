@@ -31,6 +31,42 @@ export const KEY_MASK_ACTION_A = 1 << 4; // 0x10 (Space / Enter / Z - Paint)
 export const KEY_MASK_ACTION_B = 1 << 5; // 0x20 (Shift / X / C - Change Color)
 export const KEY_MASK_RESET    = 1 << 6; // 0x40 (R - Clear Screen)
 
+// --- MMIO Audio Peripheral Constants (Sound Synthesizer & PCM Ring Buffer) ---
+export const AUDIO_BASE            = 0x00860000;
+export const AUDIO_REG_STATUS      = AUDIO_BASE + 0x00; // 32-bit: bit 0=Enabled, bit 1=Playing, bit 2=Wrap, bit 3=IRQ
+export const AUDIO_REG_CONTROL     = AUDIO_BASE + 0x04; // 32-bit: 1=Play, 0=Stop/Pause, 2=Reset
+export const AUDIO_REG_FORMAT      = AUDIO_BASE + 0x08; // 32-bit: [15:0]=SampleRate, [23:16]=Channels, [31:24]=Bits
+export const AUDIO_REG_BUFFER_BASE = AUDIO_BASE + 0x0C; // 32-bit: PCM buffer base address (default: 0x00870000)
+export const AUDIO_REG_BUFFER_SIZE = AUDIO_BASE + 0x10; // 32-bit: PCM buffer size in bytes (default: 16384)
+export const AUDIO_REG_WRITE_PTR   = AUDIO_BASE + 0x14; // 32-bit: Write cursor byte offset (guest writes)
+export const AUDIO_REG_READ_PTR    = AUDIO_BASE + 0x18; // 32-bit: Read cursor byte offset (host advances)
+export const AUDIO_REG_DROPPED     = AUDIO_BASE + 0x1C; // 32-bit: Underrun/overrun counter
+
+// Multi-Channel Chiptune PSG / Synthesizer Registers (0x00860020 - 0x0086004C)
+// Channel 0 (Pulse / Square wave)
+export const AUDIO_CH0_FREQ        = AUDIO_BASE + 0x20; // 32-bit: Frequency in Hz (e.g. 440)
+export const AUDIO_CH0_DUTY        = AUDIO_BASE + 0x24; // 32-bit: Duty cycle (0=12.5%, 1=25%, 2=50%, 3=75%)
+export const AUDIO_CH0_VOL         = AUDIO_BASE + 0x28; // 32-bit: Volume (0..255)
+export const AUDIO_CH0_WAVE        = AUDIO_BASE + 0x2C; // 32-bit: Waveform (0=Off, 1=Square, 2=Sawtooth, 3=Triangle, 4=Noise)
+
+// Channel 1 (Triangle / Melodic wave)
+export const AUDIO_CH1_FREQ        = AUDIO_BASE + 0x30;
+export const AUDIO_CH1_DUTY        = AUDIO_BASE + 0x34;
+export const AUDIO_CH1_VOL         = AUDIO_BASE + 0x38;
+export const AUDIO_CH1_WAVE        = AUDIO_BASE + 0x3C;
+
+// Channel 2 (Noise / Percussion)
+export const AUDIO_CH2_FREQ        = AUDIO_BASE + 0x40;
+export const AUDIO_CH2_DUTY        = AUDIO_BASE + 0x44;
+export const AUDIO_CH2_VOL         = AUDIO_BASE + 0x48;
+export const AUDIO_CH2_WAVE        = AUDIO_BASE + 0x4C;
+
+export const AUDIO_END             = AUDIO_BASE + 0x1000; // 4 KB page (0x00860000 - 0x00861000)
+
+// Default PCM sample ring buffer (0x00870000 - 0x00874000, 16 KB default)
+export const AUDIO_RING_BASE_DEFAULT = 0x00870000;
+export const AUDIO_RING_SIZE_DEFAULT = 16384;
+
 export class Memory {
   constructor() {
     // Map of pageNumber (address >>> 12) -> Uint8Array(4096)

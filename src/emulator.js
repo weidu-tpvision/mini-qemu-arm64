@@ -5,13 +5,15 @@ import {
   INPUT_BASE, INPUT_REG_KEY_STATE, INPUT_REG_LAST_KEY, INPUT_REG_POINTER_X,
   INPUT_REG_POINTER_Y, INPUT_REG_POINTER_BTN, INPUT_REG_FRAME_COUNT,
   KEY_MASK_UP, KEY_MASK_DOWN, KEY_MASK_LEFT, KEY_MASK_RIGHT,
-  KEY_MASK_ACTION_A, KEY_MASK_ACTION_B, KEY_MASK_RESET
+  KEY_MASK_ACTION_A, KEY_MASK_ACTION_B, KEY_MASK_RESET,
+  AUDIO_BASE, AUDIO_RING_BASE_DEFAULT, AUDIO_RING_SIZE_DEFAULT
 } from "./memory.js";
 import { CPU } from "./cpu.js";
 import { Decoder, InstructionType, ConditionCode } from "./decoder.js";
 import { ElfLoader } from "./elf_loader.js";
 import { JitCompiler } from "./jit.js";
 import { DynamicLinker } from "./dynamic_linker.js";
+import { AudioController, AudioWaveform, AudioStatus } from "./audio.js";
 
 export class MiniQEMU {
   constructor(options = {}) {
@@ -45,6 +47,8 @@ export class MiniQEMU {
     this.nextFd = 3;
     // Dynamic Linker for ELF Shared Objects (.so) and Dynamic Relocations
     this.dynamicLinker = new DynamicLinker(this);
+    // MMIO Audio Peripheral Controller & Synthesizer
+    this.audio = new AudioController(this);
   }
 
   allocFd(minFd = 3) {
@@ -234,6 +238,7 @@ export class MiniQEMU {
     this.jit?.reset();
     this.memory.clear();
     this.cpu.reset();
+    this.audio?.initHardwareRegisters();
     this.cycleCount = 0;
     const progName = typeof filePathOrBuffer === "string" ? filePathOrBuffer.split(/[/\\]/).pop() : name;
     this.loadedSource = { source: filePathOrBuffer, name: progName };
@@ -466,6 +471,27 @@ export class MiniQEMU {
       pointer: this.getPointerState(),
       frameCount: this.memory.read32(INPUT_REG_FRAME_COUNT)
     };
+  }
+
+  // --- MMIO Audio Helpers ---
+  getAudioInfo() {
+    return this.audio.getAudioInfo();
+  }
+
+  setAudioChannel(ch, freq, wave = AudioWaveform.SQUARE, volume = 128, duty = 2) {
+    this.audio.setChannel(ch, freq, wave, volume, duty);
+  }
+
+  writePcmSamples(samples) {
+    this.audio.writePcmSamples(samples);
+  }
+
+  drainAudioSamples(maxSamples = 4096) {
+    return this.audio.drainPcmSamples(maxSamples);
+  }
+
+  renderAudioFrames(frameCount, sampleRate = 44100) {
+    return this.audio.renderAudioFrames(frameCount, sampleRate);
   }
 
   // Apply ARM64 barrel shifter (00=LSL, 01=LSR, 10=ASR)

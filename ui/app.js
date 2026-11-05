@@ -844,6 +844,11 @@ function isNeonBinary(filename = "") {
   return f.includes("neon") || f.includes("float") || f.includes("simd") || f.includes("matrix");
 }
 
+function isAudioBinary(filename = "") {
+  const f = filename.toLowerCase();
+  return f.includes("audio") || f.includes("synth") || f.includes("sound") || f.includes("music");
+}
+
 function runUntilFrameOrHalt(emuInstance, maxCycles = 2000000) {
   if (emuInstance.jitEnabled && !emuInstance.onStep) {
     emuInstance.runJit(emuInstance.cycleCount + maxCycles, true);
@@ -874,12 +879,15 @@ function switchMemoryTab(tabId) {
     vramHeaderBadge.textContent =
       tabId === "screenView" ? "320×240 RGBA" :
       tabId === "stackView" ? "64-bit Frames" :
-      tabId === "heapView" ? "Dynamic Heap" : "4 KB Pages";
+      tabId === "heapView" ? "Dynamic Heap" :
+      tabId === "audioView" ? "Audio Synthesizer" : "4 KB Pages";
   }
   if (tabId === "screenView") {
     renderVramScreen(true);
   } else if (tabId === "heapView") {
     updateHeapView();
+  } else if (tabId === "audioView") {
+    updateAudioView();
   }
 }
 
@@ -1012,6 +1020,132 @@ function clearVramScreen() {
   appendTerminal("[Screen] Framebuffer cleared (0x00800000).\n");
 }
 
+// --- MMIO Audio Visualizer & Web Audio Engine ---
+let audioCtx = null;
+let audioScriptNode = null;
+let isAudioActive = false;
+let audioMasterVolume = 0.8;
+const audioWaveformBuffer = new Float32Array(320);
+
+function initWebAudio() {
+  if (typeof window === "undefined") return null;
+  if (!audioCtx) {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return null;
+    audioCtx = new AudioContextClass({ sampleRate: 44100 });
+  }
+  if (audioCtx.state === "suspended") {
+    audioCtx.resume();
+  }
+  return audioCtx;
+}
+
+function startAudioPlayback() {
+  const ctx = initWebAudio();
+  if (!ctx) return;
+  if (!audioScriptNode) {
+    audioScriptNode = ctx.createScriptProcessor(2048, 0, 1);
+    audioScriptNode.onaudioprocess = (e) => {
+      const output = e.outputBuffer.getChannelData(0);
+      const frames = emulator.renderAudioFrames(output.length, ctx.sampleRate);
+      for (let i = 0; i < output.length; i++) {
+        output[i] = frames[i] * audioMasterVolume;
+      }
+      for (let i = 0; i < Math.min(320, frames.length); i++) {
+        audioWaveformBuffer[i] = frames[i];
+      }
+      drawAudioOscilloscope();
+    };
+    audioScriptNode.connect(ctx.destination);
+  }
+  isAudioActive = true;
+  const btn = document.getElementById("toggleAudioBtn");
+  if (btn) btn.textContent = "⏹ Stop Audio";
+}
+
+function stopAudioPlayback() {
+  if (audioScriptNode) {
+    audioScriptNode.disconnect();
+    audioScriptNode = null;
+  }
+  isAudioActive = false;
+  const btn = document.getElementById("toggleAudioBtn");
+  if (btn) btn.textContent = "▶ Start Audio";
+}
+
+function drawAudioOscilloscope() {
+  const canvas = document.getElementById("audioOscilloscope");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const w = canvas.width;
+  const h = canvas.height;
+  const midY = h / 2;
+
+  ctx.fillStyle = "#040810";
+  ctx.fillRect(0, 0, w, h);
+
+  // Center guideline
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, midY);
+  ctx.lineTo(w, midY);
+  ctx.stroke();
+
+  // Draw cyan waveform line with glow
+  ctx.strokeStyle = "#00f0ff";
+  ctx.lineWidth = 2;
+  ctx.shadowColor = "#00f0ff";
+  ctx.shadowBlur = 4;
+  ctx.beginPath();
+
+  for (let x = 0; x < w; x++) {
+    const s = audioWaveformBuffer[x] || 0;
+    const y = midY - s * (midY - 4);
+    if (x === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+}
+
+function updateAudioView() {
+  const info = emulator.getAudioInfo();
+  const formatBadge = document.getElementById("audioFormatBadge");
+  const pcmBadge = document.getElementById("audioPcmBadge");
+  if (formatBadge) {
+    formatBadge.textContent = `${(info.sampleRate / 1000).toFixed(1)} kHz ${info.channels === 1 ? "Mono" : "Stereo"}`;
+  }
+  if (pcmBadge) {
+    pcmBadge.textContent = `PCM: ${info.availableBytes} B / ${info.bufferSize} B`;
+  }
+
+  const waveNames = ["OFF", "SQUARE", "SAWTOOTH", "TRIANGLE", "NOISE"];
+  const dutyNames = ["12.5%", "25%", "50%", "75%"];
+
+  const ch0 = info.channelsInfo[0];
+  const ch0Freq = document.getElementById("audioCh0Freq");
+  const ch0Meta = document.getElementById("audioCh0Meta");
+  if (ch0Freq) ch0Freq.textContent = `${ch0.freq} Hz`;
+  if (ch0Meta) ch0Meta.textContent = `Vol: ${ch0.volume} | ${dutyNames[ch0.duty & 3]} | ${waveNames[ch0.wave] || "OFF"}`;
+
+  const ch1 = info.channelsInfo[1];
+  const ch1Freq = document.getElementById("audioCh1Freq");
+  const ch1Meta = document.getElementById("audioCh1Meta");
+  if (ch1Freq) ch1Freq.textContent = `${ch1.freq} Hz`;
+  if (ch1Meta) ch1Meta.textContent = `Vol: ${ch1.volume} | ${waveNames[ch1.wave] || "OFF"}`;
+
+  const ch2 = info.channelsInfo[2];
+  const ch2Freq = document.getElementById("audioCh2Freq");
+  const ch2Meta = document.getElementById("audioCh2Meta");
+  if (ch2Freq) ch2Freq.textContent = `${ch2.freq} Hz`;
+  if (ch2Meta) ch2Meta.textContent = `Vol: ${ch2.volume} | ${waveNames[ch2.wave] || "OFF"}`;
+
+  drawAudioOscilloscope();
+}
+
 // 7. Execution Step & Loop Control
 function stepSingle() {
   if (emulator.cpu.halted) return;
@@ -1024,6 +1158,7 @@ function stepSingle() {
   updateDisassemblyPointer();
   updateMemoryGrid(currentMemAddr);
   updateHeapView();
+  updateAudioView();
   renderVramScreen();
 
   if (res.halted) {
@@ -1116,6 +1251,7 @@ function stopRunning() {
     setStatus("PAUSED", "PAUSED", "status-paused");
   }
   updateHeapView();
+  updateAudioView();
   renderVramScreen(true);
 }
 
@@ -1131,6 +1267,7 @@ function resetEmulator() {
   updateDisassemblyPointer();
   updateMemoryGrid(currentMemAddr);
   updateHeapView();
+  updateAudioView();
   renderVramScreen(true);
   setStatus("READY", "READY", "status-ready");
   appendTerminal(`[Mini-QEMU] Reset to entry point 0x${emulator.cpu.pc.toString(16).padStart(8, "0")}.\n`);
@@ -1187,6 +1324,9 @@ function loadBinaryBuffer(buffer, filename, desc = "") {
     speedLabel.textContent = SPEED_LEVELS["5"].label;
     switchMemoryTab("screenView");
     if (runBenchBtn) runBenchBtn.textContent = "⚡ Benchmark 3 Frames";
+  } else if (isAudioBinary(filename)) {
+    switchMemoryTab("audioView");
+    if (runBenchBtn) runBenchBtn.textContent = "⚡ Benchmark 5,000 Runs";
   } else if (isHeapBinary(filename)) {
     switchMemoryTab("heapView");
     if (runBenchBtn) runBenchBtn.textContent = "⚡ Benchmark 5,000 Runs";
@@ -1435,6 +1575,24 @@ if (crtScanlineToggle && scanlineOverlay) {
     } else {
       scanlineOverlay.classList.add("disabled");
     }
+  });
+}
+
+const toggleAudioBtn = document.getElementById("toggleAudioBtn");
+if (toggleAudioBtn) {
+  toggleAudioBtn.addEventListener("click", () => {
+    if (isAudioActive) {
+      stopAudioPlayback();
+    } else {
+      startAudioPlayback();
+    }
+  });
+}
+
+const audioVolumeSlider = document.getElementById("audioVolumeSlider");
+if (audioVolumeSlider) {
+  audioVolumeSlider.addEventListener("input", (e) => {
+    audioMasterVolume = Math.max(0, Math.min(1.0, Number(e.target.value) / 100));
   });
 }
 

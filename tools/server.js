@@ -82,6 +82,18 @@ const BINARY_DESCRIPTIONS = {
     title: "NEON SIMD & Floating-Point Vector Math",
     desc: "Scalar FP (SCVTF, FADD, FMUL, FDIV, FSQRT, FCMP, FCVTZS) & 128-bit NEON vector math (FMUL.4S, FADDP.4S dot product reduction).",
     category: "Floating-Point & NEON SIMD"
+  },
+  "dynamic_app.elf": {
+    name: "dynamic_app.elf",
+    title: "Dynamic ELF Application (Shared Libraries)",
+    desc: "Dynamically links against libcalc.so at runtime, resolves AArch64 relocations (R_AARCH64_JUMP_SLOT), and traps libc stubs.",
+    category: "Dynamic Linking & Shared Libraries"
+  },
+  "audio_synth.elf": {
+    name: "audio_synth.elf",
+    title: "MMIO Audio Synthesizer & Chiptune",
+    desc: "Level 1 MMIO Audio: Programs 3-channel chiptune PSG (Pulse, Triangle, Noise) and synthesizes PCM samples into ring buffer (0x00870000).",
+    category: "Audio & Sound Synthesis"
   }
 };
 

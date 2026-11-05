@@ -16,7 +16,8 @@ const TEST_FILES = [
   'tests/test_neon_fp.js',
   'tests/test_jit.js',
   'tests/test_safety_hook.js',
-  'tests/test_dynamic_linker.js'
+  'tests/test_dynamic_linker.js',
+  'tests/test_audio.js'
 ];
 
 // Ordered list of builders from package.json "build-elfs"
@@ -30,7 +31,8 @@ const BUILDER_FILES = [
   'tools/build_interactive_elf.js',
   'tools/build_dynamic_memory_elf.js',
   'tools/build_neon_matrix_elf.js',
-  'tools/build_dynamic_elf.js'
+  'tools/build_dynamic_elf.js',
+  'tools/build_audio_elf.js'
 ];
 
 /**

@@ -41,6 +41,12 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
   * **60 FPS Hardware VSync:** Uses Linux `sys_sched_yield` (`syscall 124`) to decouple guest CPU frame rendering from host display synchronization.
   * **Interactive Workbench Display:** Live HTML5 canvas with CRT scanline simulation, instant frame blits, interactive pixel inspector probe, and virtual D-Pad / action button controls.
   * **Bare-metal Demo Binaries:** `bin/graphics_pattern.elf` (SMPTE color bars), `bin/plasma.elf` (76,800-pixel demoscene plasma), and `bin/interactive_paint.elf` (interactive game/canvas painter).
+* **Level 1 MMIO Audio Peripheral & Sound Synthesizer (`0x00860000`, `src/audio.js`):**
+  * **MMIO Audio Hardware Registers (`0x00860000`):** Control status, format (sample rate, channels, bit depth), ring buffer base pointer, buffer size, write/read cursors, and dropped sample counters.
+  * **3-Channel Chiptune PSG (Programmable Sound Generator):** Channel 0 Pulse Wave (variable duty cycle: 12.5%, 25%, 50%, 75%), Channel 1 Triangle/Melodic Wave, and Channel 2 Galois LFSR pseudo-random noise generator.
+  * **PCM Ring Buffer Streaming (`0x00870000`):** 16 KB circular buffer for streaming direct digital audio samples from guest programs.
+  * **Web Audio API & Live Phosphor Oscilloscope:** Integrated in the browser visual debugger with master volume control and a real-time glowing waveform canvas.
+  * **Bare-metal Music Demo:** `bin/audio_synth.elf` playing an arpeggiated melodic chord progression with 100% bit-exact parity in both interpreter and JIT modes.
 * **Scalar Floating-Point (VFP) & 128-bit NEON Advanced SIMD:**
   * **32 128-bit Vector Registers (`V0`–`V31`):** Backed by a unified 512-byte `ArrayBuffer` with zero-copy aliased views for `Q0`–`Q31` (128-bit quadwords), `D0`–`D31` (64-bit IEEE-754 doubles), `S0`–`S31` (32-bit singles), `H0`–`H31` (16-bit halfwords), and `B0`–`B31` (8-bit bytes).
   * **Scalar VFP & Conversions:** Full support for `FADD`, `FSUB`, `FMUL`, `FDIV`, `FNMUL`, `FNEG`, `FABS`, `FSQRT`, `FMAX`, `FMIN`, `FCMP` (including IEEE-754 `NaN` unordered flags), `SCVTF`, `UCVTF`, saturating `FCVTZS`/`FCVTZU`, `FCVT`, and `FMOV` (register, immediate, and GPR $\leftrightarrow$ FPR bitcasts).
@@ -155,6 +161,7 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── decoder.js                 # ARM64 bitfield instruction decoder (75+ Integer, System, VFP & NEON instructions)
 │   ├── elf_loader.js              # Universal ELF64 binary parser (Node.js & Browser DataView)
 │   ├── dynamic_linker.js          # ELF dynamic linker, .so shared library loader, AArch64 relocations & HLE stubs
+│   ├── audio.js                   # MMIO audio peripheral controller, 3-channel PSG sound synthesizer & WAV export
 │   ├── emulator.js                # Core Fetch-Decode-Execute pipeline, VFS, syscalls, hooks & breakpoints
 │   ├── jit.js                     # Dynamic JIT basic block compiler, direct block chaining & code cache
 │   ├── static_recompiler.js       # Approach 1: Binary-to-Source (JS) static AOT recompiler
@@ -164,7 +171,7 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── style.css                  # Clean modern dark-mode theme & animations
 │   ├── app.js                     # Browser debugger, NEON/Heap/VRAM inspectors & AOT benchmark runner
 │   └── fs_shim.js                 # Browser module shim for zero-build execution
-├── tests/                         # Automated Test Suite (12 Suites)
+├── tests/                         # Automated Test Suite (13 Suites)
 │   ├── test_decoder.js            # Unit tests for instruction decoding, shifts, bitfields, and math
 │   ├── test_ui_api.js             # Unit tests for UI hooks, breakpoints, memory diffs & reset
 │   ├── test_server.js             # Integration tests for HTTP dev server & binary streaming
@@ -176,7 +183,8 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── test_neon_fp.js            # Unit tests for Scalar VFP, 128-bit NEON SIMD, saturation & translators
 │   ├── test_jit.js                # Unit tests for Dynamic JIT tiered compilation, parity & 140x+ speedup
 │   ├── test_safety_hook.js        # Unit tests for agent execution sandboxing & permission overrides
-│   └── test_dynamic_linker.js     # Unit tests for PT_DYNAMIC, shared libraries (.so), relocations & HLE
+│   ├── test_dynamic_linker.js     # Unit tests for PT_DYNAMIC, shared libraries (.so), relocations & HLE
+│   └── test_audio.js              # Unit tests for MMIO audio registers, PSG synthesizer, PCM streaming & WAV
 ├── tools/                         # Server, Preview Generator & ELF64 Binary Builders
 │   ├── server.js                  # Zero-dependency Node HTTP dev server (`npm run ui`)
 │   ├── generate_ui_preview.js     # Generates docs/ui_preview.svg and docs/ui_preview.png
@@ -189,13 +197,14 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── build_interactive_elf.js   # Generates bin/interactive_paint.elf (interactive gamepad/mouse painter)
 │   ├── build_dynamic_memory_elf.js# Generates bin/dynamic_memory.elf (boundary-tag malloc/free & coalescing)
 │   ├── build_neon_matrix_elf.js   # Generates bin/neon_matrix.elf (3D VFP hypotenuse & NEON 4S dot product)
-│   └── build_dynamic_elf.js       # Generates bin/libcalc.so and bin/dynamic_app.elf
+│   ├── build_dynamic_elf.js       # Generates bin/libcalc.so and bin/dynamic_app.elf
+│   └── build_audio_elf.js         # Generates bin/audio_synth.elf (bare-metal PSG chiptune & PCM audio generator)
 ├── guest/                         # Freestanding C++ Guest Source Code
 │   ├── fib.cpp                    # Iterative Fibonacci source code
 │   ├── fib_rec.cpp                # Recursive Fibonacci source code
 │   ├── hello.cpp                  # String I/O source code
 │   └── heap_demo.cpp              # Dynamic heap allocation source code
-├── bin/                           # Compiled 64-bit ARM ELF Executables & Shared Objects (12 Binaries)
+├── bin/                           # Compiled 64-bit ARM ELF Executables & Shared Objects (13 Binaries)
 │   ├── fib.elf                    # Iterative Fibonacci(10) = 55
 │   ├── fib_rec.elf                # Recursive Fibonacci(10) = 55
 │   ├── hello.elf                  # String I/O via Linux sys_write
@@ -207,7 +216,8 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── dynamic_memory.elf         # Boundary-tag allocator (malloc, free, reuse & coalescing)
 │   ├── neon_matrix.elf            # Scalar VFP 3D magnitude & 128-bit NEON 4xFloat32 dot product
 │   ├── dynamic_app.elf            # Dynamic ELF executable linked against libcalc.so and HLE libc
-│   └── libcalc.so                 # Shared library exporting calc_add and calc_cube
+│   ├── libcalc.so                 # Shared library exporting calc_add and calc_cube
+│   └── audio_synth.elf            # Level 1 MMIO audio synthesizer (3-channel chiptune & PCM generator)
 ├── out/                           # Generated AOT & Binary Translator Outputs
 │   ├── fib_recompiled.js          # Lifted JavaScript module from static_recompiler.js
 │   ├── fib_translated.asm         # Translated x86-64 NASM/Intel assembly (fib.elf)
@@ -220,6 +230,7 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── instructions.md            # Comprehensive ARM64 instruction set reference (75+ instructions)
 │   ├── dynamic_jit_architecture.md# Deep dive on dynamic JIT compilation, direct block chaining & SMC
 │   ├── dynamic_linking_architecture.md # Deep dive on ELF dynamic linking, shared objects (.so) & relocations
+│   ├── audio_architecture.md      # Deep dive on MMIO audio peripheral, 3-channel PSG sound synthesizer & PCM
 │   ├── floating_point_and_neon_architecture.md # Deep dive on scalar VFP, 128-bit NEON & SIMD translation
 │   ├── dynamic_memory_architecture.md          # Deep dive on sys_brk, sys_mmap/munmap & allocators
 │   ├── graphics_architecture_and_emulation.md  # Deep dive on console graphics (PPU, Switch, PS5 & shaders)

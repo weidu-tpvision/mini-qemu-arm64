@@ -362,3 +362,4 @@ The modular bitfield decoder in [`src/decoder.js`](file:///C:/Users/wei.du/WorkA
 | **128-bit NEON SIMD** | Parallel lane loops on 512-byte buffer | Unrolled JS float/int lane arithmetic | Packed SSE instructions: `addps`, `mulps`, `haddps`, `paddd` |
 | **MMIO VRAM (0x800000)** | Fast 4KB dirty-page tracking to Canvas | Direct typed buffer writes | Direct memory store thunks |
 | **MMIO Input (0x850000)**| Live keyboard bitmask & mouse $(X,Y)$ polling | Synchronized input state registers | Peripheral read/write thunks |
+| **MMIO Audio (0x860000)**| 3-channel Chiptune PSG & PCM ring buffer (0x870000) | Synchronized channel audio registers | Peripheral sound synthesis thunks |
