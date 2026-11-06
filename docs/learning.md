@@ -278,7 +278,7 @@ Mini-QEMU implements:
    - In [`bin/threads.elf`](../bin/threads.elf), worker threads concurrently execute `ldadd w1, wzr, [x2]` on a shared memory counter without mutex contention.
 2. **Cooperative Coroutine Thread Scheduler:**
    - Each thread possesses an independent CPU execution context (GPRs, SP, condition flags, TLS `TPIDR_EL0`).
-   - The emulator implements a round-robin scheduler with cooperative timeslicing (500 instruction quantum or cooperative `sys_sched_yield`).
+   - The emulator implements a round-robin scheduler with cooperative timeslicing (50 instruction quantum or cooperative `sys_sched_yield`).
 3. **Linux Kernel Synchronization (`sys_clone` & `sys_futex`):**
    - `sys_clone` (`syscall 220`) instantiates child threads sharing virtual address space (`CLONE_VM`) with independent stacks.
    - `sys_futex` (`syscall 98`) provides zero-overhead userspace synchronization barriers: `FUTEX_WAIT` suspends threads until a memory barrier condition is satisfied, and `FUTEX_WAKE` resumes blocked threads.

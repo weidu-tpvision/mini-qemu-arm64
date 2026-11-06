@@ -105,7 +105,7 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 
 ---
 
-## Supported Instruction Set (75+ Core Instructions: Integer, Memory, Float & NEON SIMD)
+## Supported Instruction Set (80+ Core Instructions: Integer, Memory, Float, NEON SIMD & LSE Atomics)
 
 > [!TIP]
 > **Complete Instruction Architecture Reference:** For exhaustive bitfield encodings, IEEE-754 semantics, addressing modes, condition code truth tables, and AOT/x86 translation mappings, see **[instructions.md](instructions.md)** (or **[docs/instructions.md](docs/instructions.md)**).

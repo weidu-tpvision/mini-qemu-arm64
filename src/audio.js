@@ -160,7 +160,13 @@ export class AudioController {
       // Convert float [-1.0, 1.0] to int16 if needed
       let int16Val = typeof sample === "number" && (sample < -1.0 || sample > 1.0)
         ? Math.floor(sample)
-        : Math.floor(Math.max(-1.0, Math.min(1.0, sample)) * 32767);
+        : Math.floor(sample < 0 ? Math.max(-1.0, sample) * 32768 : Math.min(1.0, sample) * 32767);
+
+      // Track buffer overrun when writes exceed buffer capacity
+      if (info.availableBytes + (i + 1) * 2 > bufSize) {
+        const dropped = this.memory.read32(AUDIO_REG_DROPPED);
+        this.memory.write32(AUDIO_REG_DROPPED, (dropped + 1) >>> 0);
+      }
 
       const targetAddr = bufBase + writePtr;
       this.memory.write16(targetAddr, int16Val & 0xffff);

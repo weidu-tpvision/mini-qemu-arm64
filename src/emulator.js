@@ -1,4 +1,4 @@
-// emulator.js - Mini-QEMU ARM64 User-Space Emulator (75+ Integer, System, VFP Float & NEON SIMD Instructions)
+// emulator.js - Mini-QEMU ARM64 User-Space Emulator (80+ Integer, System, VFP Float, NEON SIMD & LSE Atomics Instructions)
 import {
   Memory,
   VRAM_BASE, FB_WIDTH, FB_HEIGHT, FB_BPP, FB_SIZE, VRAM_END,
@@ -78,9 +78,11 @@ export class MiniQEMU {
     if (this.threads.size <= 1) return false;
 
     const currentCtx = this.threads.get(this.currentThreadId);
-    if (currentCtx && currentCtx.status === "RUNNING") {
+    if (currentCtx && currentCtx.status !== "DEAD") {
       currentCtx.cpuState = this.cpu.saveState();
-      currentCtx.status = "READY";
+      if (currentCtx.status === "RUNNING") {
+        currentCtx.status = "READY";
+      }
     }
 
     const threadList = Array.from(this.threads.values());
@@ -110,12 +112,13 @@ export class MiniQEMU {
 
   futexWake(uaddr, count = 1) {
     let woken = 0;
+    const maxWake = typeof count === "number" && count > 0 ? count : 1;
     for (const thread of this.threads.values()) {
       if (thread.status === "WAITING" && thread.waitAddr === uaddr) {
         thread.status = "READY";
         thread.waitAddr = null;
         woken++;
-        if (woken >= count) break;
+        if (woken >= maxWake) break;
       }
     }
     return woken;
@@ -576,6 +579,10 @@ export class MiniQEMU {
 
   renderAudioFrames(frameCount, sampleRate = 44100) {
     return this.audio.renderAudioFrames(frameCount, sampleRate);
+  }
+
+  resetAudioBuffer() {
+    this.audio.resetPcmBuffer();
   }
 
   // Apply ARM64 barrel shifter (00=LSL, 01=LSR, 10=ASR)
@@ -1141,7 +1148,7 @@ export class MiniQEMU {
     } else if (syscallNum === 98) { // sys_futex(uaddr, futex_op, val, timeout, uaddr2, val3)
       const uaddr = Number(this.cpu.getReg(0));
       const futexOp = Number(this.cpu.getReg(1)) & ~128; // Clear FUTEX_PRIVATE_FLAG (128)
-      const val = Number(BigInt.asIntN(32, this.cpu.getReg(2)));
+      const val = Number(BigInt.asUintN(32, this.cpu.getReg(2)));
       if (futexOp === 0) { // FUTEX_WAIT
         if (uaddr > 0) {
           const curVal = this.memory.read32(uaddr);

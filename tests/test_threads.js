@@ -222,12 +222,16 @@ for (const jitEnabled of [false, true]) {
 
   // Child thread is TID 1001, Parent is TID 1000
   const futexAddr = 0x00415000;
-  emu.memory.write32(futexAddr, 0);
+  // Test high-bit unsigned futex word (e.g. FUTEX_WAITERS = 0x80000000)
+  emu.memory.write32(futexAddr, 0x80000000);
 
-  // Parent calls FUTEX_WAIT on futexAddr with expected 0 -> suspends!
+  // Set canary register in Parent before waiting
+  emu.cpu.setReg(19, 0x12345678n);
+
+  // Parent calls FUTEX_WAIT on futexAddr with expected 0x80000000 -> suspends!
   emu.cpu.setReg(0, BigInt(futexAddr));
   emu.cpu.setReg(1, 0n); // FUTEX_WAIT
-  emu.cpu.setReg(2, 0n); // expected 0
+  emu.cpu.setReg(2, 0x80000000n); // expected 0x80000000
   emu.cpu.setReg(8, 98n);
   emu.handleSyscall();
 
@@ -237,6 +241,9 @@ for (const jitEnabled of [false, true]) {
   // Switch to child thread 1001
   emu.scheduleNextThread();
   assert(emu.currentThreadId === 1001, "Scheduler must activate child thread");
+
+  // Mutate canary register in Child
+  emu.cpu.setReg(19, 0x87654321n);
 
   // Child calls FUTEX_WAKE on futexAddr -> wakes parent
   emu.cpu.setReg(0, BigInt(futexAddr));
@@ -258,6 +265,7 @@ for (const jitEnabled of [false, true]) {
 
   // Parent resumes
   assert(emu.currentThreadId === 1000, "Scheduler must switch back to parent");
+  assert(emu.cpu.getReg(19) === 0x12345678n, "Parent canary register X19 must be preserved across FUTEX_WAIT");
   console.log("[PASS] Linux sys_futex (FUTEX_WAIT, FUTEX_WAKE) and clear_child_tid lifecycle verified.");
 }
 

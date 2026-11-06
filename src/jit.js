@@ -1706,9 +1706,8 @@ export class JitCompiler {
         }
 
         case InstructionType.SVC:
-          lines.push(`cpu.pc = 0x${pc.toString(16)}n;`);
-          lines.push(`emu.handleSyscall(${decoded.imm16});`);
           lines.push(`cpu.pc = 0x${(pc + 4).toString(16)}n;`);
+          lines.push(`emu.handleSyscall(${decoded.imm16});`);
           lines.push(`return ${idx + 1};`);
           break;
 

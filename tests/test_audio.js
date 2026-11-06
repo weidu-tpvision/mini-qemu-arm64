@@ -111,6 +111,13 @@ console.log("Running MMIO Audio Peripheral & Sound Synthesizer Unit Tests...\n")
   assert.strictEqual(info.writePtr, 0, "Write pointer must wrap to 0");
   assert.ok((info.status & AudioStatus.WRAP) !== 0, "Status must latch WRAP flag");
 
+  // Test full -1.0 dynamic range
+  emu.resetAudioBuffer();
+  emu.writePcmSamples([-1.0]);
+  const drainedNeg = emu.drainAudioSamples(1);
+  assert.strictEqual(drainedNeg.length, 1);
+  assert.strictEqual(drainedNeg[0], -1.0, "Drained -1.0 sample must be exactly -1.0");
+
   console.log("[PASS] PCM ring buffer streaming, draining, and wrapping verified");
 }
 
