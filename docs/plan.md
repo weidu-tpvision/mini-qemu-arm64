@@ -181,6 +181,28 @@ The processor state consists of:
      * **Guest Terminal:** Live Linux syscall output viewer with exit code reporting.
      * **Custom Binary Loader:** Drag-and-drop custom ELF upload and speed slider (1 Hz to Turbo).
 
+### Phase 7: Advanced Execution Architecture & Hardware Peripherals
+* **Goal:** Expand Mini-QEMU with production-grade binary translation optimizations, MMIO hardware peripherals, dynamic linking, and multi-threaded concurrency.
+* **Deliverables:**
+  1. **Option A — Direct JIT Block Chaining:**
+     * Direct jump patching between basic blocks (`linkTaken` / `linkFallthrough`) bypassing the dynamic lookup loop.
+     * Two-way block linking with precise invalidation tracking on self-modifying code (`SMC`).
+     * Achieves 140x+ benchmark execution speedup over pure interpretation.
+  2. **Option B — MMIO Audio Synthesizer & PCM Ring Buffer:**
+     * Hardware MMIO peripheral controller mapped at `0x00860000` with 3-channel chiptune PSG (Pulse, Triangle, Galois LFSR Noise).
+     * 16 KB PCM audio streaming ring buffer (`0x00870000`) and standard 44-byte RIFF/WAV file exporter.
+     * Bit-exact execution parity between interpreter and JIT for `bin/audio_synth.elf`.
+  3. **Option C — Multi-Threading & ARMv8.1-A LSE Atomics:**
+     * Single-instruction atomic memory operations (`CAS`, `SWP`, `LDADD`, `LDCLR`, `LDEOR`, `LDSET`) supporting 8, 16, 32, and 64-bit sizes with acquire/release semantics.
+     * Cooperative coroutine round-robin thread scheduler with quantum accounting and context switching.
+     * Linux thread lifecycle syscalls: `sys_clone` (220), `sys_futex` (98: `FUTEX_WAIT`, `FUTEX_WAKE`), `sys_sched_yield` (124), `sys_set_tid_address` (96), and `sys_gettid` (178).
+     * Bare-metal multi-threaded demo `bin/threads.elf` and test suite `tests/test_threads.js`.
+  4. **Option D — ELF Dynamic Linker & Shared Libraries:**
+     * Full dynamic linking pipeline parsing `PT_INTERP` and `PT_DYNAMIC` ELF tables (`DT_NEEDED`, `DT_STRTAB`, `DT_SYMTAB`, `DT_JMPREL`).
+     * Symbol resolution and AArch64 relocation engine (`R_AARCH64_RELATIVE`, `R_AARCH64_JUMP_SLOT`).
+     * Synthetic High-Level Emulation (HLE) stubs via `SVC #0xdd` for C library functions.
+     * Shared library `bin/libcalc.so`, dynamic executable `bin/dynamic_app.elf`, and test suite `tests/test_dynamic_linker.js`.
+
 ---
 
 ## 4. Verification & Testing Strategy

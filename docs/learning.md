@@ -250,3 +250,37 @@ Mini-QEMU implements three unified MMIO hardware regions:
    - **PCM Ring Buffer (`0x00870000`):** 16 KB circular buffer for direct digital sample streaming with wrap-around tracking.
    - **Web Audio & Oscilloscope:** The frontend plays synthesized audio via the Web Audio API and draws a real-time cyan phosphor oscilloscope.
 
+---
+
+## 10. Case Study 7: ELF Dynamic Linking, Shared Objects & AArch64 Relocations (`dynamic_app.elf`)
+
+In real-world applications, programs rarely ship as single static monoliths; instead, they link against shared libraries (`.so` files like `libc.so.6`) at startup.
+
+Mini-QEMU's dynamic linker ([`src/dynamic_linker.js`](../src/dynamic_linker.js)) models this exact operating system startup ceremony:
+1. **`PT_INTERP` & `PT_DYNAMIC`:** The ELF loader detects dynamic executables by checking for an ELF interpreter request and the dynamic section tag table (`DT_NEEDED`, `DT_STRTAB`, `DT_SYMTAB`, `DT_JMPREL`).
+2. **Library Resolution & Base Relocation:** Shared objects (such as `libcalc.so`) are mapped to isolated high memory pages (e.g. `0x20000000`).
+3. **AArch64 Relocations:**
+   - `R_AARCH64_RELATIVE` (type 1027): Re-bases internal data pointers by adding the library load base address:
+     $$\text{Target} = \text{Base} + \text{Addend}$$
+   - `R_AARCH64_JUMP_SLOT` (type 1026): Patches the Procedure Linkage Table Global Offset Table (`.got.plt`) slots to point directly to exported symbols (e.g., `calc_add` and `calc_cube`).
+4. **High-Level Emulation (HLE) Syscall Stubs:**
+   - Standard C library functions that depend on the host OS (such as `puts`, `printf`, `malloc`, `exit`) are routed to synthetic HLE stubs using a dedicated supervisor call trap (`SVC #0xdd`), maintaining lightweight user-space execution without requiring full glibc porting.
+
+---
+
+## 11. Case Study 8: Multi-Threading, Coroutine Scheduling & ARMv8.1-A LSE Atomics (`threads.elf`)
+
+Modern high-performance workloads require concurrent thread execution and lock-free atomic memory operations.
+
+Mini-QEMU implements:
+1. **ARMv8.1-A Large System Extensions (LSE):**
+   - Replaces traditional multi-instruction exclusive load/store loops (`LDXR`/`STXR`) with single-instruction atomic operations: `CAS` (Compare and Swap), `SWP` (Atomic Swap), and `LDADD`/`LDCLR`/`LDEOR`/`LDSET` (Atomic Read-Modify-Write).
+   - In [`bin/threads.elf`](../bin/threads.elf), worker threads concurrently execute `ldadd w1, wzr, [x2]` on a shared memory counter without mutex contention.
+2. **Cooperative Coroutine Thread Scheduler:**
+   - Each thread possesses an independent CPU execution context (GPRs, SP, condition flags, TLS `TPIDR_EL0`).
+   - The emulator implements a round-robin scheduler with cooperative timeslicing (500 instruction quantum or cooperative `sys_sched_yield`).
+3. **Linux Kernel Synchronization (`sys_clone` & `sys_futex`):**
+   - `sys_clone` (`syscall 220`) instantiates child threads sharing virtual address space (`CLONE_VM`) with independent stacks.
+   - `sys_futex` (`syscall 98`) provides zero-overhead userspace synchronization barriers: `FUTEX_WAIT` suspends threads until a memory barrier condition is satisfied, and `FUTEX_WAKE` resumes blocked threads.
+   - Upon thread termination (`sys_exit`), `clear_child_tid` automatically zeroes the thread ID pointer and wakes awaiting joiners, enabling clean barrier synchronization between worker and parent threads.
+
