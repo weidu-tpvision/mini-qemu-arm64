@@ -20,6 +20,7 @@ This document provides a comprehensive reference for all ARM64 (AArch64) instruc
    - [Scalar Floating-Point (VFP)](#scalar-floating-point-vfp)
    - [NEON Advanced SIMD (Vector Operations)](#neon-advanced-simd-vector-operations)
    - [Floating-Point & Vector Memory Operations](#floating-point--vector-memory-operations)
+   - [ARMv8.1-A Large System Extensions (LSE Atomics)](#armv81-a-large-system-extensions-lse-atomics)
 3. [Condition Code Evaluation (NZCV)](#3-condition-code-evaluation-nzcv)
 4. [Instruction Decoding Architecture](#4-instruction-decoding-architecture)
 5. [Dual Execution & Binary Translation Mapping](#5-dual-execution--binary-translation-mapping)
@@ -293,6 +294,23 @@ Mini-QEMU implements 64-bit (`Q=0`) and 128-bit (`Q=1`) NEON vector operations p
 
 ---
 
+### ARMv8.1-A Large System Extensions (LSE Atomics)
+
+Mini-QEMU implements the core ARMv8.1-A Large System Extensions (LSE) single-instruction atomic memory operations, supporting 8-bit (`b`), 16-bit (`h`), 32-bit (`w`), and 64-bit (`x`) register operands with acquire (`a`), release (`l`), and acquire-release (`al`) memory ordering tags.
+
+| Mnemonic | Syntax | Description | Operand Size | Semantics | x86-64 Translation |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `CAS` | `cas Ws, Wt, [Xn]` | Compare and Swap | 8, 16, 32, 64 bits | If `*Xn == Ws` then `*Xn = Wt`; `Ws = old(*Xn)` | `lock cmpxchg [r64], reg` |
+| `SWP` | `swp Ws, Wt, [Xn]` | Atomic Swap | 8, 16, 32, 64 bits | `old = *Xn; *Xn = Ws; Wt = old` | `xchg [r64], reg` |
+| `LDADD` | `ldadd Ws, Wt, [Xn]` | Atomic Add | 8, 16, 32, 64 bits | `old = *Xn; *Xn = old + Ws; Wt = old` | `lock xadd [r64], reg` |
+| `LDCLR` | `ldclr Ws, Wt, [Xn]` | Atomic Bit Clear | 8, 16, 32, 64 bits | `old = *Xn; *Xn = old & ~Ws; Wt = old` | `lock and [r64], ~reg` |
+| `LDEOR` | `ldeor Ws, Wt, [Xn]` | Atomic Exclusive OR | 8, 16, 32, 64 bits | `old = *Xn; *Xn = old ^ Ws; Wt = old` | `lock xor [r64], reg` |
+| `LDSET` | `ldset Ws, Wt, [Xn]` | Atomic Bit Set | 8, 16, 32, 64 bits | `old = *Xn; *Xn = old \| Ws; Wt = old` | `lock or [r64], reg` |
+
+When `Rt` is register 31 (`WZR` / `XZR`), atomic memory operations execute without returning the previous memory value to a general-purpose register.
+
+---
+
 ## 3. Condition Code Evaluation (NZCV)
 
 ARM64 instructions evaluate condition codes against the `NZCV` status flags:
@@ -363,3 +381,4 @@ The modular bitfield decoder in [`src/decoder.js`](file:///C:/Users/wei.du/WorkA
 | **MMIO VRAM (0x800000)** | Fast 4KB dirty-page tracking to Canvas | Direct typed buffer writes | Direct memory store thunks |
 | **MMIO Input (0x850000)**| Live keyboard bitmask & mouse $(X,Y)$ polling | Synchronized input state registers | Peripheral read/write thunks |
 | **MMIO Audio (0x860000)**| 3-channel Chiptune PSG & PCM ring buffer (0x870000) | Synchronized channel audio registers | Peripheral sound synthesis thunks |
+| **LSE Atomics & Threads**| Cooperative coroutine scheduler, `sys_clone`, `sys_futex` & atomic RMW memory | Sequential atomic JS memory ops & thread state capture | `lock cmpxchg`, `xchg`, `lock xadd` & atomic memory barriers |

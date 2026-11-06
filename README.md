@@ -92,6 +92,12 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
   * **AArch64 Relocation Engine:** Applies `R_AARCH64_JUMP_SLOT` (1026), `R_AARCH64_RELATIVE` (1027), and `R_AARCH64_GLOB_DAT` (1025) relocations to wire PLT jumps and GOT references.
   * **High-Level Emulation (HLE) Trampoline Stubs:** Generates guest stubs in high memory (`0x70000000+`) trapping via `SVC #0xdd` into host JavaScript implementations of standard C functions (`puts`, `strlen`, `abs`).
   * **Bit-Exact Interpreter & JIT Parity:** Dynamically-linked executables (`bin/dynamic_app.elf` calling `bin/libcalc.so`) execute with identical results in both interpreter and JIT modes.
+* **ARMv8.1-A LSE Atomics & Multi-Threading (`sys_clone` & `sys_futex`):**
+  * **ARMv8.1-A Large System Extensions (LSE):** Single-instruction atomic read-modify-write memory operations including Compare and Swap (`CAS`, `CASA`, `CASL`, `CASAL`), Atomic Swap (`SWP`), Atomic Add (`LDADD`, `STADD`), Atomic Bit Clear (`LDCLR`), Atomic XOR (`LDEOR`), and Atomic Bit Set (`LDSET`) across 8-bit, 16-bit, 32-bit, and 64-bit word widths.
+  * **Linux Multi-Threading via `sys_clone` (`syscall 220`):** Creates worker threads with isolated stack frames (`0x00420000`), shared virtual memory (`CLONE_VM`), thread grouping (`CLONE_THREAD`), and TLS pointers (`CLONE_SETTLS`).
+  * **Fast Userspace Locking via `sys_futex` (`syscall 98`):** Complete `FUTEX_WAIT` and `FUTEX_WAKE` synchronization primitives with automated child TID cleanup (`CLONE_CHILD_CLEARTID`).
+  * **Cooperative Coroutine Round-Robin Scheduler:** Seamlessly time-slices between active threads on `sys_sched_yield` (`syscall 124`) or quantum expiry with 100% bit-exact parity in both interpreter and JIT modes.
+  * **Multi-threaded Demo Binary:** `bin/threads.elf` (concurrency showcase verifying atomic increments and barrier wakeups).
 * **Dual & Tiered Execution Modes:**
   1. **Interactive Interpreter:** Step-by-step cycle execution with full register dumps and memory diff tracking.
   2. **Dynamic JIT Compiler:** Real-time tiered basic block compilation delivering **100+x speedup** on live loops.
@@ -149,6 +155,9 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 | **Vector & FP Memory** | `LDR` / `STR` (FPR) | Load and store scalar single/double floating-point registers |
 | | `LDR` / `STR` (VPR) | Load and store full 128-bit `Q0`–`Q31` vector registers |
 | | `LDP` / `STP` (FPR/VPR) | Load/Store pair of floating-point and vector registers |
+| **ARMv8.1-A LSE Atomics**| `CAS` / `CASA` / `CASL` / `CASAL` | Compare and Swap (8/16/32/64-bit) with acquire/release semantics |
+| | `SWP` / `SWPA` / `SWPL` / `SWPAL` | Atomic Swap with register return value |
+| | `LDADD` / `LDCLR` / `LDEOR` / `LDSET` | Atomic Add, Bit Clear, XOR, Bit Set with memory update & old value load |
 
 ---
 
@@ -171,7 +180,7 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── style.css                  # Clean modern dark-mode theme & animations
 │   ├── app.js                     # Browser debugger, NEON/Heap/VRAM inspectors & AOT benchmark runner
 │   └── fs_shim.js                 # Browser module shim for zero-build execution
-├── tests/                         # Automated Test Suite (13 Suites)
+├── tests/                         # Automated Test Suite (14 Suites)
 │   ├── test_decoder.js            # Unit tests for instruction decoding, shifts, bitfields, and math
 │   ├── test_ui_api.js             # Unit tests for UI hooks, breakpoints, memory diffs & reset
 │   ├── test_server.js             # Integration tests for HTTP dev server & binary streaming
@@ -184,7 +193,8 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── test_jit.js                # Unit tests for Dynamic JIT tiered compilation, parity & 140x+ speedup
 │   ├── test_safety_hook.js        # Unit tests for agent execution sandboxing & permission overrides
 │   ├── test_dynamic_linker.js     # Unit tests for PT_DYNAMIC, shared libraries (.so), relocations & HLE
-│   └── test_audio.js              # Unit tests for MMIO audio registers, PSG synthesizer, PCM streaming & WAV
+│   ├── test_audio.js              # Unit tests for MMIO audio registers, PSG synthesizer, PCM streaming & WAV
+│   └── test_threads.js            # Unit tests for ARMv8.1-A LSE atomics, sys_clone & futex synchronization
 ├── tools/                         # Server, Preview Generator & ELF64 Binary Builders
 │   ├── server.js                  # Zero-dependency Node HTTP dev server (`npm run ui`)
 │   ├── generate_ui_preview.js     # Generates docs/ui_preview.svg and docs/ui_preview.png
@@ -198,13 +208,14 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── build_dynamic_memory_elf.js# Generates bin/dynamic_memory.elf (boundary-tag malloc/free & coalescing)
 │   ├── build_neon_matrix_elf.js   # Generates bin/neon_matrix.elf (3D VFP hypotenuse & NEON 4S dot product)
 │   ├── build_dynamic_elf.js       # Generates bin/libcalc.so and bin/dynamic_app.elf
-│   └── build_audio_elf.js         # Generates bin/audio_synth.elf (bare-metal PSG chiptune & PCM audio generator)
+│   ├── build_audio_elf.js         # Generates bin/audio_synth.elf (bare-metal PSG chiptune & PCM audio generator)
+│   └── build_threads_elf.js       # Generates bin/threads.elf (multi-threading, LSE atomics & futex synchronization)
 ├── guest/                         # Freestanding C++ Guest Source Code
 │   ├── fib.cpp                    # Iterative Fibonacci source code
 │   ├── fib_rec.cpp                # Recursive Fibonacci source code
 │   ├── hello.cpp                  # String I/O source code
 │   └── heap_demo.cpp              # Dynamic heap allocation source code
-├── bin/                           # Compiled 64-bit ARM ELF Executables & Shared Objects (13 Binaries)
+├── bin/                           # Compiled 64-bit ARM ELF Executables & Shared Objects (14 Binaries)
 │   ├── fib.elf                    # Iterative Fibonacci(10) = 55
 │   ├── fib_rec.elf                # Recursive Fibonacci(10) = 55
 │   ├── hello.elf                  # String I/O via Linux sys_write
@@ -217,7 +228,8 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── neon_matrix.elf            # Scalar VFP 3D magnitude & 128-bit NEON 4xFloat32 dot product
 │   ├── dynamic_app.elf            # Dynamic ELF executable linked against libcalc.so and HLE libc
 │   ├── libcalc.so                 # Shared library exporting calc_add and calc_cube
-│   └── audio_synth.elf            # Level 1 MMIO audio synthesizer (3-channel chiptune & PCM generator)
+│   ├── audio_synth.elf            # Level 1 MMIO audio synthesizer (3-channel chiptune & PCM generator)
+│   └── threads.elf                # Multi-threaded clone, LSE atomics & futex barrier synchronization
 ├── out/                           # Generated AOT & Binary Translator Outputs
 │   ├── fib_recompiled.js          # Lifted JavaScript module from static_recompiler.js
 │   ├── fib_translated.asm         # Translated x86-64 NASM/Intel assembly (fib.elf)
@@ -228,6 +240,7 @@ A lightweight, from-scratch 64-bit ARM (AArch64) user-space CPU emulator and Ahe
 │   ├── ui_preview.svg             # High-resolution vector preview of the Web UI
 │   ├── ui_preview.png             # Raster PNG preview of the Web UI
 │   ├── instructions.md            # Comprehensive ARM64 instruction set reference (75+ instructions)
+│   ├── multithreading_and_atomics_architecture.md # Deep dive on ARMv8.1-A LSE atomics, sys_clone & futex
 │   ├── dynamic_jit_architecture.md# Deep dive on dynamic JIT compilation, direct block chaining & SMC
 │   ├── dynamic_linking_architecture.md # Deep dive on ELF dynamic linking, shared objects (.so) & relocations
 │   ├── audio_architecture.md      # Deep dive on MMIO audio peripheral, 3-channel PSG sound synthesizer & PCM

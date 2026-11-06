@@ -301,6 +301,46 @@ export class CPU {
     this.exitCode = 0;
   }
 
+  // Save CPU context for thread switching / coroutine management
+  saveState() {
+    const vCopy = new Uint8Array(this.vBytes.length);
+    vCopy.set(this.vBytes);
+    return {
+      x: new BigUint64Array(this.x),
+      vBytes: vCopy,
+      fpcr: this.fpcr,
+      fpsr: this.fpsr,
+      sp: this.sp,
+      pc: this.pc,
+      tpidr_el0: this.tpidr_el0,
+      sysRegs: new Map(this.sysRegs),
+      flags: { ...this.flags },
+      halted: this.halted,
+      exitCode: this.exitCode
+    };
+  }
+
+  // Restore CPU context for thread switching
+  restoreState(state) {
+    this.x.set(state.x);
+    this.vBytes.set(state.vBytes);
+    this.fpcr = state.fpcr;
+    this.fpsr = state.fpsr;
+    this.sp = state.sp;
+    this.pc = state.pc;
+    this.tpidr_el0 = state.tpidr_el0;
+    this.sysRegs.clear();
+    for (const [k, v] of state.sysRegs) {
+      this.sysRegs.set(k, v);
+    }
+    this.flags.N = state.flags.N;
+    this.flags.Z = state.flags.Z;
+    this.flags.C = state.flags.C;
+    this.flags.V = state.flags.V;
+    this.halted = state.halted;
+    this.exitCode = state.exitCode;
+  }
+
   // Snapshot full CPU state for UI rendering
   getSnapshot() {
     const regs = [];

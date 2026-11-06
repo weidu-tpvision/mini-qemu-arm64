@@ -92,6 +92,14 @@ export const InstructionType = {
   LDXR: "LDXR",
   STXR: "STXR",
 
+  // ARMv8.1-A Large System Extensions (LSE) Atomics
+  CAS: "CAS",     // Compare and Swap (cas, casa, casl, casal)
+  SWP: "SWP",     // Atomic Swap (swp, swpa, swpl, swpal)
+  LDADD: "LDADD", // Atomic Add (ldadd, ldadda, ldaddl, ldaddal)
+  LDCLR: "LDCLR", // Atomic Bit Clear (ldclr, ldclra, ldclrl, ldclral)
+  LDEOR: "LDEOR", // Atomic Bitwise XOR (ldeor, ldeora, ldeorl, ldeoral)
+  LDSET: "LDSET", // Atomic Bit Set (ldset, ldseta, ldsetl, ldsetal)
+
   // --- Floating-Point (Scalar VFP) ---
   FADD: "FADD",         // Floating-point Add (Single/Double)
   FSUB: "FSUB",         // Floating-point Subtract
@@ -1019,9 +1027,32 @@ export class Decoder {
         }
       }
 
-      // o2=1, o1=1: CAS family (LSE) => UNKNOWN
+      // o2=1, o1=1: CAS family (LSE Compare and Swap)
       if (o2 === 1 && o1 === 1) {
-        return { type: InstructionType.UNKNOWN, raw, disassembly: `unknown cas 0x${raw.toString(16)}` };
+        const bytes = 1 << size;
+        const sf = size === 3 ? 1 : 0;
+        const regPrefix = sf ? "x" : "w";
+        const suffix = size === 0 ? "b" : (size === 1 ? "h" : "");
+        let mnem = "cas";
+        if (lBit === 1 && o0 === 1) mnem = "casal";
+        else if (lBit === 1 && o0 === 0) mnem = "casl";
+        else if (lBit === 0 && o0 === 1) mnem = "casa";
+        mnem += suffix;
+        const rsName = rs === 31 ? (sf ? "xzr" : "wzr") : `${regPrefix}${rs}`;
+        const rtName = rt === 31 ? (sf ? "xzr" : "wzr") : `${regPrefix}${rt}`;
+        return {
+          type: InstructionType.CAS,
+          raw,
+          sf,
+          size,
+          bytes,
+          rs,
+          rt,
+          rn,
+          aBit: o0,
+          rBit: lBit,
+          disassembly: `${mnem} ${rsName}, ${rtName}, [${baseName}]`
+        };
       }
     }
 
@@ -1151,6 +1182,45 @@ export class Decoder {
       else if (option === 0b111) extStr = `, sxtx${regShift ? ` #${regShift}` : ""}`;
       else if (regShift > 0) extStr = `, lsl #${regShift}`;
       addrStr = `[${baseName}, ${rmName}${extStr}]`;
+    } else if (!isVec && ((raw >>> 21) & 1) === 1 && ((raw >>> 10) & 0b11) === 0b00) {
+      // ARMv8.1-A Atomic Memory Operations (LDADD, LDCLR, LDEOR, LDSET, SWP)
+      const aBit = (raw >>> 23) & 1;
+      const rBit = (raw >>> 22) & 1;
+      const rs = (raw >>> 16) & 0x1f;
+      const opcAtomic = (raw >>> 12) & 0xf;
+      const bytes = 1 << size;
+      const sf = size === 3 ? 1 : 0;
+      const regPrefix = sf ? "x" : "w";
+      const sizeSuffix = size === 0 ? "b" : (size === 1 ? "h" : "");
+      const orderSuffix = (aBit && rBit) ? "al" : (aBit ? "a" : (rBit ? "l" : ""));
+
+      let baseMnem = "";
+      let type = InstructionType.UNKNOWN;
+      if (opcAtomic === 0b0000) { baseMnem = "ldadd"; type = InstructionType.LDADD; }
+      else if (opcAtomic === 0b0001) { baseMnem = "ldclr"; type = InstructionType.LDCLR; }
+      else if (opcAtomic === 0b0010) { baseMnem = "ldeor"; type = InstructionType.LDEOR; }
+      else if (opcAtomic === 0b0011) { baseMnem = "ldset"; type = InstructionType.LDSET; }
+      else if (opcAtomic === 0b1000) { baseMnem = "swp"; type = InstructionType.SWP; }
+      else {
+        return { type: InstructionType.UNKNOWN, raw, disassembly: `unknown atomic 0x${raw.toString(16)}` };
+      }
+
+      const rsName = rs === 31 ? (sf ? "xzr" : "wzr") : `${regPrefix}${rs}`;
+      const rtName = rt === 31 ? (sf ? "xzr" : "wzr") : `${regPrefix}${rt}`;
+      const mnemonic = `${baseMnem}${orderSuffix}${sizeSuffix}`;
+      return {
+        type,
+        raw,
+        sf,
+        size,
+        bytes,
+        rs,
+        rt,
+        rn,
+        aBit,
+        rBit,
+        disassembly: `${mnemonic} ${rsName}, ${rtName}, [${baseName}]`
+      };
     } else {
       return { type: InstructionType.UNKNOWN, raw, disassembly: `unknown ldr/str 0x${raw.toString(16)}` };
     }

@@ -197,6 +197,7 @@ The processor state consists of:
 | **Web UI & Debugger API** | Breakpoints, stepping, memory block reads, and program reset | All UI hooks and server tests passing | **PASS** |
 | **Direct Block Chaining (Option A)** | Direct jump patching between hot JIT blocks (`linkTaken`/`linkFallthrough`) with clean unlinking on invalidation | 140x+ benchmark speedup over interpreter | **PASS** |
 | **MMIO Audio & Synthesizer (Option B)** | 3-channel Chiptune PSG (Pulse, Triangle, Noise), PCM ring buffer (0x00870000), WAV export & oscilloscope | Bit-exact parity between interpreter & JIT on `audio_synth.elf` | **PASS** |
+| **Multi-threading & LSE Atomics (Option C)** | ARMv8.1-A LSE atomics (`CAS`, `SWP`, `LDADD`, `LDCLR`, `LDEOR`, `LDSET`), `sys_clone`, `sys_futex`, round-robin scheduler | Bit-exact parity between interpreter & JIT on `threads.elf` (94 cycles, exitCode 42) | **PASS** |
 | **Dynamic Linker & Shared Libraries (Option D)** | Load `libcalc.so`, parse `PT_DYNAMIC`, apply `R_AARCH64_JUMP_SLOT` / `RELATIVE`, HLE `SVC #0xdd` | Bit-exact parity between interpreter & JIT on `dynamic_app.elf` | **PASS** |
 
 ---

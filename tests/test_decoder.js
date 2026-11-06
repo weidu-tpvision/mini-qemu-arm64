@@ -290,10 +290,19 @@ console.log("Running ARM64 Instruction Decoder Extended Unit Tests...\n");
   const dLdxp = Decoder.decode(0xc87f0440); // ldxp x0, x1, [x2]
   assert(dLdxp.type === InstructionType.LDXR && dLdxp.pair === true && dLdxp.rt2 === 1 && dLdxp.bytes === 8, "ldxp must have pair=true, rt2=1, bytes=8");
 
-  const dCas = Decoder.decode(0xc8a07c41); // cas
-  assert(dCas.type === InstructionType.UNKNOWN, `CAS must decode as UNKNOWN, got ${dCas.type}`);
+  const dCas = Decoder.decode(0xc8a07c41); // cas x0, x1, [x2]
+  assert(dCas.type === InstructionType.CAS, `CAS must decode as CAS, got ${dCas.type}`);
+  assert(dCas.disassembly === "cas x0, x1, [x2]", `CAS disassembly mismatch: ${dCas.disassembly}`);
 
-  console.log(`[PASS] Regression tests (1-src vs 2-src, PACIASP, LDXRB, STLR, LDXP, CAS) verified.`);
+  const dLdadd = Decoder.decode(0xf8200041); // ldadd x0, x1, [x2]
+  assert(dLdadd.type === InstructionType.LDADD && dLdadd.bytes === 8, "ldadd x0, x1, [x2] must decode as LDADD");
+  assert(dLdadd.disassembly === "ldadd x0, x1, [x2]", `LDADD disassembly mismatch: ${dLdadd.disassembly}`);
+
+  const dSwp = Decoder.decode(0xf8208041); // swp x0, x1, [x2]
+  assert(dSwp.type === InstructionType.SWP && dSwp.bytes === 8, "swp x0, x1, [x2] must decode as SWP");
+  assert(dSwp.disassembly === "swp x0, x1, [x2]", `SWP disassembly mismatch: ${dSwp.disassembly}`);
+
+  console.log(`[PASS] Regression tests (1-src vs 2-src, PACIASP, LDXRB, STLR, LDXP, CAS, LDADD, SWP) verified.`);
 }
 
 console.log("\nAll Decoder Unit Tests Passed Successfully!");

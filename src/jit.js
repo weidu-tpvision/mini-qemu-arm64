@@ -1623,6 +1623,88 @@ export class JitCompiler {
           break;
         }
 
+        // --- ARMv8.1-A Large System Extensions (LSE) Atomics ---
+        case InstructionType.CAS: {
+          lines.push(`{`);
+          lines.push(`  const addr = Number(${spOrReg(decoded.rn)});`);
+          const bytes = decoded.bytes;
+          const readExpr = bytes === 1 ? "BigInt(memory.read8(addr))"
+            : bytes === 2 ? "BigInt(memory.read16(addr))"
+            : bytes === 4 ? "BigInt(memory.read32(addr))"
+            : "memory.read64(addr)";
+          const mask = bytes === 8 ? "0xffffffffffffffffn" : `((1n << ${BigInt(bytes * 8)}n) - 1n)`;
+          lines.push(`  const oldVal = ${readExpr};`);
+          lines.push(`  const expected = ${regExpr(decoded.rs)} & ${mask};`);
+          lines.push(`  if (oldVal === expected) {`);
+          lines.push(`    const newVal = ${regExpr(decoded.rt)} & ${mask};`);
+          if (bytes === 1) lines.push(`    memory.write8(addr, Number(newVal));`);
+          else if (bytes === 2) lines.push(`    memory.write16(addr, Number(newVal));`);
+          else if (bytes === 4) lines.push(`    memory.write32(addr, Number(newVal));`);
+          else lines.push(`    memory.write64(addr, newVal);`);
+          lines.push(`  }`);
+          if (decoded.rs !== 31) {
+            lines.push(`  x[${decoded.rs}] = oldVal;`);
+          }
+          lines.push(`}`);
+          break;
+        }
+
+        case InstructionType.SWP: {
+          lines.push(`{`);
+          lines.push(`  const addr = Number(${spOrReg(decoded.rn)});`);
+          const bytes = decoded.bytes;
+          const readExpr = bytes === 1 ? "BigInt(memory.read8(addr))"
+            : bytes === 2 ? "BigInt(memory.read16(addr))"
+            : bytes === 4 ? "BigInt(memory.read32(addr))"
+            : "memory.read64(addr)";
+          const mask = bytes === 8 ? "0xffffffffffffffffn" : `((1n << ${BigInt(bytes * 8)}n) - 1n)`;
+          lines.push(`  const oldVal = ${readExpr};`);
+          lines.push(`  const newVal = ${regExpr(decoded.rs)} & ${mask};`);
+          if (bytes === 1) lines.push(`  memory.write8(addr, Number(newVal));`);
+          else if (bytes === 2) lines.push(`  memory.write16(addr, Number(newVal));`);
+          else if (bytes === 4) lines.push(`  memory.write32(addr, Number(newVal));`);
+          else lines.push(`  memory.write64(addr, newVal);`);
+          if (decoded.rt !== 31) {
+            lines.push(`  x[${decoded.rt}] = oldVal;`);
+          }
+          lines.push(`}`);
+          break;
+        }
+
+        case InstructionType.LDADD:
+        case InstructionType.LDCLR:
+        case InstructionType.LDEOR:
+        case InstructionType.LDSET: {
+          lines.push(`{`);
+          lines.push(`  const addr = Number(${spOrReg(decoded.rn)});`);
+          const bytes = decoded.bytes;
+          const readExpr = bytes === 1 ? "BigInt(memory.read8(addr))"
+            : bytes === 2 ? "BigInt(memory.read16(addr))"
+            : bytes === 4 ? "BigInt(memory.read32(addr))"
+            : "memory.read64(addr)";
+          const mask = bytes === 8 ? "0xffffffffffffffffn" : `((1n << ${BigInt(bytes * 8)}n) - 1n)`;
+          lines.push(`  const oldVal = ${readExpr};`);
+          lines.push(`  const srcVal = ${regExpr(decoded.rs)} & ${mask};`);
+          if (decoded.type === InstructionType.LDADD) {
+            lines.push(`  const newVal = (oldVal + srcVal) & ${mask};`);
+          } else if (decoded.type === InstructionType.LDCLR) {
+            lines.push(`  const newVal = (oldVal & (~srcVal)) & ${mask};`);
+          } else if (decoded.type === InstructionType.LDEOR) {
+            lines.push(`  const newVal = (oldVal ^ srcVal) & ${mask};`);
+          } else {
+            lines.push(`  const newVal = (oldVal | srcVal) & ${mask};`);
+          }
+          if (bytes === 1) lines.push(`  memory.write8(addr, Number(newVal));`);
+          else if (bytes === 2) lines.push(`  memory.write16(addr, Number(newVal));`);
+          else if (bytes === 4) lines.push(`  memory.write32(addr, Number(newVal));`);
+          else lines.push(`  memory.write64(addr, newVal);`);
+          if (decoded.rt !== 31) {
+            lines.push(`  x[${decoded.rt}] = oldVal;`);
+          }
+          lines.push(`}`);
+          break;
+        }
+
         case InstructionType.SVC:
           lines.push(`cpu.pc = 0x${pc.toString(16)}n;`);
           lines.push(`emu.handleSyscall(${decoded.imm16});`);

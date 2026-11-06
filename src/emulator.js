@@ -49,6 +49,86 @@ export class MiniQEMU {
     this.dynamicLinker = new DynamicLinker(this);
     // MMIO Audio Peripheral Controller & Synthesizer
     this.audio = new AudioController(this);
+
+    // Multi-Threading & Cooperative Coroutine Scheduler State
+    this.threads = new Map(); // tid -> ThreadContext
+    this.currentThreadId = 1000;
+    this.nextTid = 1001;
+    this.schedulerQuantum = options.schedulerQuantum ?? 50; // Max cycles per time slice
+    this.currentQuantumCycles = 0;
+  }
+
+  ensureCurrentThread() {
+    let cur = this.threads.get(this.currentThreadId);
+    if (!cur) {
+      cur = {
+        tid: this.currentThreadId,
+        cpuState: this.cpu.saveState(),
+        status: "RUNNING",
+        waitAddr: null,
+        clear_child_tid: 0,
+        cyclesRan: 0
+      };
+      this.threads.set(this.currentThreadId, cur);
+    }
+    return cur;
+  }
+
+  scheduleNextThread() {
+    if (this.threads.size <= 1) return false;
+
+    const currentCtx = this.threads.get(this.currentThreadId);
+    if (currentCtx && currentCtx.status === "RUNNING") {
+      currentCtx.cpuState = this.cpu.saveState();
+      currentCtx.status = "READY";
+    }
+
+    const threadList = Array.from(this.threads.values());
+    const currentIndex = threadList.findIndex(t => t.tid === this.currentThreadId);
+
+    let nextCtx = null;
+    for (let offset = 1; offset <= threadList.length; offset++) {
+      const candidate = threadList[(currentIndex + offset) % threadList.length];
+      if (candidate.status === "READY") {
+        nextCtx = candidate;
+        break;
+      }
+    }
+
+    if (nextCtx && nextCtx.tid !== this.currentThreadId) {
+      this.currentThreadId = nextCtx.tid;
+      nextCtx.status = "RUNNING";
+      this.cpu.restoreState(nextCtx.cpuState);
+      return true;
+    }
+
+    if (currentCtx && currentCtx.status === "READY") {
+      currentCtx.status = "RUNNING";
+    }
+    return false;
+  }
+
+  futexWake(uaddr, count = 1) {
+    let woken = 0;
+    for (const thread of this.threads.values()) {
+      if (thread.status === "WAITING" && thread.waitAddr === uaddr) {
+        thread.status = "READY";
+        thread.waitAddr = null;
+        woken++;
+        if (woken >= count) break;
+      }
+    }
+    return woken;
+  }
+
+  getThreads() {
+    return Array.from(this.threads.values()).map(t => ({
+      tid: t.tid,
+      status: t.status,
+      pc: t.tid === this.currentThreadId ? Number(this.cpu.pc) : Number(t.cpuState.pc),
+      sp: t.tid === this.currentThreadId ? Number(this.cpu.sp) : Number(t.cpuState.sp),
+      cyclesRan: t.cyclesRan
+    }));
   }
 
   allocFd(minFd = 3) {
@@ -373,6 +453,10 @@ export class MiniQEMU {
 
   reset() {
     this.jit?.reset();
+    this.threads.clear();
+    this.currentThreadId = 1000;
+    this.nextTid = 1001;
+    this.currentQuantumCycles = 0;
     if (this.loadedSource) {
       return this.loadElf(this.loadedSource.source, this.loadedSource.name);
     } else {
@@ -594,12 +678,44 @@ export class MiniQEMU {
 
     const syscallNum = Number(this.cpu.getReg(8));
     let isYield = false;
+    let threadExited = false;
 
-    if (syscallNum === 93 || syscallNum === 94) { // sys_exit (93) / sys_exit_group (94)
+    if (syscallNum === 94) { // sys_exit_group (94)
       this.cpu.exitCode = Number(this.cpu.getReg(0));
       this.cpu.halted = true;
       if (this.onHalt) {
         this.onHalt(this.cpu.exitCode);
+      }
+    } else if (syscallNum === 93) { // sys_exit (93)
+      const exitCode = Number(this.cpu.getReg(0));
+      if (this.threads.size <= 1) {
+        this.cpu.exitCode = exitCode;
+        this.cpu.halted = true;
+        if (this.onHalt) {
+          this.onHalt(this.cpu.exitCode);
+        }
+      } else {
+        const curCtx = this.ensureCurrentThread();
+        curCtx.status = "DEAD";
+        threadExited = true;
+        if (curCtx.clear_child_tid > 0) {
+          this.memory.write32(curCtx.clear_child_tid, 0);
+          this.futexWake(curCtx.clear_child_tid, 1);
+        }
+        let aliveCount = 0;
+        for (const t of this.threads.values()) {
+          if (t.status === "READY" || t.status === "WAITING" || t.status === "RUNNING") {
+            aliveCount++;
+          }
+        }
+        if (aliveCount === 0) {
+          this.cpu.exitCode = exitCode;
+          this.cpu.halted = true;
+          if (this.onHalt) this.onHalt(this.cpu.exitCode);
+        } else {
+          isYield = true;
+          this.scheduleNextThread();
+        }
       }
     } else if (syscallNum === 17) { // sys_getcwd(buf, size)
       const bufAddr = Number(this.cpu.getReg(0));
@@ -757,6 +873,52 @@ export class MiniQEMU {
         this.brk = requestedBrk;
         this.cpu.setReg(0, this.brk);
       }
+    } else if (syscallNum === 220) { // sys_clone(flags, stack_ptr, parent_tidptr, tls_ptr, child_tidptr)
+      const flags = Number(this.cpu.getReg(0));
+      const stackPtr = this.cpu.getReg(1);
+      const parentTidPtr = Number(this.cpu.getReg(2));
+      const tlsPtr = this.cpu.getReg(3);
+      const childTidPtr = Number(this.cpu.getReg(4));
+
+      const CLONE_SETTLS = 0x00080000;
+      const CLONE_PARENT_SETTID = 0x00100000;
+      const CLONE_CHILD_CLEARTID = 0x00200000;
+      const CLONE_CHILD_SETTID = 0x01000000;
+
+      this.ensureCurrentThread();
+      const childTid = this.nextTid++;
+
+      // Clone CPU state for child
+      const childState = this.cpu.saveState();
+      childState.x[0] = 0n; // Child returns 0 from clone()
+      childState.pc = this.cpu.pc; // Child resumes after SVC instruction (already advanced)
+      if (stackPtr !== 0n) {
+        childState.sp = stackPtr;
+      }
+      if ((flags & CLONE_SETTLS) && tlsPtr !== 0n) {
+        childState.tpidr_el0 = tlsPtr;
+      }
+
+      if ((flags & CLONE_PARENT_SETTID) && parentTidPtr > 0) {
+        this.memory.write32(parentTidPtr, childTid);
+      }
+      if ((flags & CLONE_CHILD_SETTID) && childTidPtr > 0) {
+        this.memory.write32(childTidPtr, childTid);
+      }
+
+      const childCtx = {
+        tid: childTid,
+        cpuState: childState,
+        status: "READY",
+        waitAddr: null,
+        clear_child_tid: (flags & CLONE_CHILD_CLEARTID) ? childTidPtr : 0,
+        cyclesRan: 0
+      };
+      this.threads.set(childTid, childCtx);
+
+      // Parent returns child TID in X0
+      this.cpu.setReg(0, BigInt(childTid));
+      isYield = true;
     } else if (syscallNum === 222) { // sys_mmap(addr, length, prot, flags, fd, offset)
       const addr = this.cpu.getReg(0);
       const len = this.cpu.getReg(1);
@@ -838,8 +1000,15 @@ export class MiniQEMU {
       writeField(195, "#1 SMP Mini-QEMU");
       writeField(260, "aarch64");
       this.cpu.setReg(0, 0n);
-    } else if (syscallNum === 96 || syscallNum === 172 || syscallNum === 178) { // set_tid_address (96), getpid (172), gettid (178)
+    } else if (syscallNum === 96) { // sys_set_tid_address(tidptr)
+      const tidptr = Number(this.cpu.getReg(0));
+      const curThread = this.ensureCurrentThread();
+      curThread.clear_child_tid = tidptr;
+      this.cpu.setReg(0, BigInt(this.currentThreadId));
+    } else if (syscallNum === 172) { // sys_getpid
       this.cpu.setReg(0, 1000n);
+    } else if (syscallNum === 178) { // sys_gettid
+      this.cpu.setReg(0, BigInt(this.currentThreadId));
     } else if (syscallNum === 278) { // sys_getrandom(buf, buflen, flags)
       const bufAddr = Number(this.cpu.getReg(0));
       const buflen = Number(this.cpu.getReg(1));
@@ -979,12 +1148,22 @@ export class MiniQEMU {
           if (curVal !== val) {
             this.cpu.setReg(0, BigInt.asUintN(64, -11n)); // -EAGAIN
           } else {
+            if (this.threads.size > 1) {
+              const curThread = this.ensureCurrentThread();
+              curThread.status = "WAITING";
+              curThread.waitAddr = uaddr;
+            }
             this.cpu.setReg(0, 0n);
+            isYield = true;
           }
         } else {
           this.cpu.setReg(0, 0n);
         }
-      } else { // FUTEX_WAKE (1), FUTEX_REQUEUE (3), etc.
+      } else if (futexOp === 1) { // FUTEX_WAKE
+        const woken = this.futexWake(uaddr, val);
+        this.cpu.setReg(0, BigInt(woken));
+        isYield = true;
+      } else { // FUTEX_REQUEUE (3), etc.
         this.cpu.setReg(0, 0n);
       }
     } else if (syscallNum === 99) { // sys_set_robust_list(head, len)
@@ -1133,7 +1312,7 @@ export class MiniQEMU {
     }
 
     this.lastYielded = isYield;
-    return { yielded: isYield, halted: this.cpu.halted };
+    return { yielded: isYield, halted: this.cpu.halted, threadExited };
   }
 
   // Execute one cycle: Fetch -> Decode -> Execute
@@ -1824,11 +2003,91 @@ export class MiniQEMU {
         break;
       }
 
+      // --- ARMv8.1-A Large System Extensions (LSE) Atomics ---
+      case InstructionType.CAS: {
+        const addr = Number(this.cpu.getSPOrReg(decoded.rn));
+        const bytes = decoded.bytes;
+        let oldVal;
+        if (bytes === 1) oldVal = BigInt(this.memory.read8(addr));
+        else if (bytes === 2) oldVal = BigInt(this.memory.read16(addr));
+        else if (bytes === 4) oldVal = BigInt(this.memory.read32(addr));
+        else oldVal = this.memory.read64(addr);
+
+        const mask = bytes === 8 ? 0xffffffffffffffffn : ((1n << BigInt(bytes * 8)) - 1n);
+        const expected = this.cpu.getReg(decoded.rs) & mask;
+        if (oldVal === expected) {
+          const newVal = this.cpu.getReg(decoded.rt) & mask;
+          if (bytes === 1) this.memory.write8(addr, Number(newVal));
+          else if (bytes === 2) this.memory.write16(addr, Number(newVal));
+          else if (bytes === 4) this.memory.write32(addr, Number(newVal));
+          else this.memory.write64(addr, newVal);
+        }
+        this.cpu.setReg(decoded.rs, oldVal);
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.SWP: {
+        const addr = Number(this.cpu.getSPOrReg(decoded.rn));
+        const bytes = decoded.bytes;
+        let oldVal;
+        if (bytes === 1) oldVal = BigInt(this.memory.read8(addr));
+        else if (bytes === 2) oldVal = BigInt(this.memory.read16(addr));
+        else if (bytes === 4) oldVal = BigInt(this.memory.read32(addr));
+        else oldVal = this.memory.read64(addr);
+
+        const mask = bytes === 8 ? 0xffffffffffffffffn : ((1n << BigInt(bytes * 8)) - 1n);
+        const newVal = this.cpu.getReg(decoded.rs) & mask;
+        if (bytes === 1) this.memory.write8(addr, Number(newVal));
+        else if (bytes === 2) this.memory.write16(addr, Number(newVal));
+        else if (bytes === 4) this.memory.write32(addr, Number(newVal));
+        else this.memory.write64(addr, newVal);
+
+        this.cpu.setReg(decoded.rt, oldVal);
+        this.cpu.pc += 4n;
+        break;
+      }
+
+      case InstructionType.LDADD:
+      case InstructionType.LDCLR:
+      case InstructionType.LDEOR:
+      case InstructionType.LDSET: {
+        const addr = Number(this.cpu.getSPOrReg(decoded.rn));
+        const bytes = decoded.bytes;
+        let oldVal;
+        if (bytes === 1) oldVal = BigInt(this.memory.read8(addr));
+        else if (bytes === 2) oldVal = BigInt(this.memory.read16(addr));
+        else if (bytes === 4) oldVal = BigInt(this.memory.read32(addr));
+        else oldVal = this.memory.read64(addr);
+
+        const mask = bytes === 8 ? 0xffffffffffffffffn : ((1n << BigInt(bytes * 8)) - 1n);
+        const srcVal = this.cpu.getReg(decoded.rs) & mask;
+        let newVal;
+        if (decoded.type === InstructionType.LDADD) {
+          newVal = (oldVal + srcVal) & mask;
+        } else if (decoded.type === InstructionType.LDCLR) {
+          newVal = (oldVal & (~srcVal)) & mask;
+        } else if (decoded.type === InstructionType.LDEOR) {
+          newVal = (oldVal ^ srcVal) & mask;
+        } else {
+          newVal = (oldVal | srcVal) & mask;
+        }
+
+        if (bytes === 1) this.memory.write8(addr, Number(newVal));
+        else if (bytes === 2) this.memory.write16(addr, Number(newVal));
+        else if (bytes === 4) this.memory.write32(addr, Number(newVal));
+        else this.memory.write64(addr, newVal);
+
+        this.cpu.setReg(decoded.rt, oldVal);
+        this.cpu.pc += 4n;
+        break;
+      }
+
       // --- Syscalls ---
       case InstructionType.SVC: {
+        this.cpu.pc += 4n;
         const sysRes = this.handleSyscall(decoded.imm16);
         isYield = sysRes.yielded;
-        this.cpu.pc += 4n;
         break;
       }
 
@@ -2439,6 +2698,14 @@ export class MiniQEMU {
       this.onStep(stepResult);
     }
 
+    if (this.threads.size > 1 && !this.cpu.halted) {
+      this.currentQuantumCycles++;
+      if (isYield || this.currentQuantumCycles >= this.schedulerQuantum) {
+        this.scheduleNextThread();
+        this.currentQuantumCycles = 0;
+      }
+    }
+
     if (verbose) {
       console.log(`[Cycle ${this.cycleCount.toString().padStart(3, " ")}] ${hexPC}: ${hexInstr} | ${decoded.disassembly.padEnd(25, " ")} | ${this.cpu.dumpState()}`);
     }
@@ -2516,6 +2783,16 @@ export class MiniQEMU {
           this.jit.stats.jitCycles += executed;
           block.execCount++;
           if (this.cpu.halted || (stopOnYield && this.lastYielded)) return this.cpu.exitCode;
+
+          if (this.threads.size > 1 && !this.cpu.halted) {
+            this.currentQuantumCycles += executed;
+            if (this.lastYielded || this.currentQuantumCycles >= this.schedulerQuantum) {
+              this.scheduleNextThread();
+              this.currentQuantumCycles = 0;
+              break;
+            }
+          }
+
           const nextPC = Number(this.cpu.pc);
           if (this.breakpoints.has(nextPC)) return this.cpu.exitCode;
 

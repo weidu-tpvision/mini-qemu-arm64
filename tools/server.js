@@ -94,6 +94,12 @@ const BINARY_DESCRIPTIONS = {
     title: "MMIO Audio Synthesizer & Chiptune",
     desc: "Level 1 MMIO Audio: Programs 3-channel chiptune PSG (Pulse, Triangle, Noise) and synthesizes PCM samples into ring buffer (0x00870000).",
     category: "Audio & Sound Synthesis"
+  },
+  "threads.elf": {
+    name: "threads.elf",
+    title: "Multi-Threading & LSE Atomics",
+    desc: "Spawns worker thread via sys_clone (220), mutates shared memory using ARMv8.1-A LSE atomics (LDADD, SWP), and synchronizes via sys_futex (98).",
+    category: "Multi-Threading & Atomics"
   }
 };
 
