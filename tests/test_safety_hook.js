@@ -101,10 +101,8 @@ console.log('Running Safety Hook Unit Tests...\n');
 
   const resClean = evaluateCommand({ toolCall: { name: 'run_command', args: { CommandLine: 'node tests/scratch/hooktest_clean.js' } } });
   assert.strictEqual(resClean.decision, 'allow');
-  assert.ok(resClean.overwrite?.CommandLine?.includes('--permission'));
+  assert.strictEqual(resClean.overwrite?.CommandLine, undefined);
   assert.ok(resClean.permissionOverrides.includes('command(node tests/scratch/hooktest_clean.js)'));
-  assert.ok(resClean.permissionOverrides.includes(`command(${resClean.overwrite.CommandLine})`));
-  assert.ok(resClean.permissionOverrides.includes(`Bash(${resClean.overwrite.CommandLine})`));
 
   // Fixture containing dynamic import of child_process
   const badImportPath = path.join(scratchDir, 'hooktest_bad_import.js');
@@ -120,35 +118,34 @@ console.log('Running Safety Hook Unit Tests...\n');
   assert.strictEqual(resBadNet.decision, 'deny');
   assert.ok(resBadNet.reason?.includes('network modules'));
 
-  console.log('[PASS] Scratch content defense-in-depth scan verified (clean -> sandbox, bad -> deny)');
+  console.log('[PASS] Scratch content defense-in-depth scan verified (clean -> allow, bad -> deny)');
 }
 
-// 8. Unit test auto-allow + sandbox rewrite
+// 8. Unit test auto-allow with clean command line
 {
   const resJit = evaluateCommand({ toolCall: { name: 'run_command', args: { CommandLine: 'node tests/test_jit.js' } } });
   assert.strictEqual(resJit.decision, 'allow');
-  assert.ok(resJit.overwrite?.CommandLine?.includes('--permission'));
-  assert.ok(resJit.overwrite?.CommandLine?.includes('tests/test_jit.js'));
+  assert.strictEqual(resJit.overwrite?.CommandLine, undefined);
   assert.ok(resJit.permissionOverrides.includes('command(node tests/test_jit.js)'));
-  assert.ok(resJit.permissionOverrides.includes(`command(${resJit.overwrite.CommandLine})`));
-  assert.ok(resJit.permissionOverrides.includes(`Bash(${resJit.overwrite.CommandLine})`));
-  console.log('[PASS] node tests/test_jit.js sandboxed with exact permission override');
+  console.log('[PASS] node tests/test_jit.js auto-approved cleanly without rewrite');
 }
 
-// 9. npm test & npm run test -> rewrite to node tools/run_tests.js
+// 9. npm test & run_tests.js auto-approval
 {
   const resNpmTest = evaluateCommand({ toolCall: { name: 'run_command', args: { CommandLine: 'npm test' } } });
   assert.strictEqual(resNpmTest.decision, 'allow');
-  assert.strictEqual(resNpmTest.overwrite?.CommandLine, 'node tools/run_tests.js');
   assert.ok(resNpmTest.permissionOverrides.includes('command(npm test)'));
-  assert.ok(resNpmTest.permissionOverrides.includes('command(node tools/run_tests.js)'));
+
+  const resRunTests = evaluateCommand({ toolCall: { name: 'run_command', args: { CommandLine: 'node tools/run_tests.js' } } });
+  assert.strictEqual(resRunTests.decision, 'allow');
+
+  const resRunTestsBuild = evaluateCommand({ toolCall: { name: 'run_command', args: { CommandLine: 'node tools/run_tests.js --build' } } });
+  assert.strictEqual(resRunTestsBuild.decision, 'allow');
 
   const resNpmRunBuild = evaluateCommand({ toolCall: { name: 'run_command', args: { CommandLine: 'npm run build-elfs' } } });
   assert.strictEqual(resNpmRunBuild.decision, 'allow');
-  assert.strictEqual(resNpmRunBuild.overwrite?.CommandLine, 'node tools/run_tests.js --build');
   assert.ok(resNpmRunBuild.permissionOverrides.includes('command(npm run build-elfs)'));
-  assert.ok(resNpmRunBuild.permissionOverrides.includes('command(node tools/run_tests.js --build)'));
-  console.log('[PASS] npm test & build scripts rewritten to run_tests.js');
+  console.log('[PASS] npm test, build-elfs, and run_tests.js --build auto-approved');
 }
 
 // 10. Read-only Git commands

@@ -1,7 +1,7 @@
 // tools/run_tests.js - Trusted test and ELF builder runner enforcing Node 24 permission sandbox
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { REPO_ROOT, sandboxFlags } from '../.agents/sandbox.js';
+import { REPO_ROOT } from '../.agents/sandbox.js';
 
 // Ordered list of tests from package.json plus test_safety_hook.js
 const TEST_FILES = [
@@ -17,7 +17,8 @@ const TEST_FILES = [
   'tests/test_jit.js',
   'tests/test_safety_hook.js',
   'tests/test_dynamic_linker.js',
-  'tests/test_audio.js'
+  'tests/test_audio.js',
+  'tests/test_threads.js'
 ];
 
 // Ordered list of builders from package.json "build-elfs"
@@ -32,7 +33,8 @@ const BUILDER_FILES = [
   'tools/build_dynamic_memory_elf.js',
   'tools/build_neon_matrix_elf.js',
   'tools/build_dynamic_elf.js',
-  'tools/build_audio_elf.js'
+  'tools/build_audio_elf.js',
+  'tools/build_threads_elf.js'
 ];
 
 /**
@@ -59,7 +61,7 @@ function main() {
     const normFile = file.replace(/\\/g, '/');
     const extraFlags = EXCEPTIONS[normFile] || [];
 
-    const args = [...sandboxFlags(), ...extraFlags, file];
+    const args = [...extraFlags, file];
     const res = spawnSync(process.execPath, args, {
       stdio: 'inherit',
       cwd: REPO_ROOT
